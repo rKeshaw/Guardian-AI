@@ -1,0 +1,42 @@
+version: '3.8'
+services:
+  guardian_ai:
+    build: .
+    ports:
+      - "8888:8888"
+    environment:
+      - DATABASE_URL=sqlite:///./guardian.db
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_BASE_URL=http://ollama:11434
+    depends_on:
+      - redis
+      - ollama
+    volumes:
+      - ./:/app
+      - ./data:/app/data
+      - ./logs:/app/logsi
+      - /mnt/d/PayloadsAllTheThings:/PayloadsAllTheThings
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_ORIGINS=*
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  redis_data:
+
