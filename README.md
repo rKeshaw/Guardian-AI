@@ -22,10 +22,10 @@ Guardian-AI is an advanced, multi-agent AI-powered penetration testing and secur
                    |           Guardian-AI Orchestrator          |
                    +---------------------------------------------+
                      |        |         |         |         |
-         +-----------+    +---+-----+  +---+---+  +---+---+  +---+---+
-         |ReconMaster|    |VulnHunter| |Payload  | |Shadow  | |Report  |
-         |(Recon)    |    |(Vuln)    | |Smith    | |Ops     | |Master  |
-         +-----------+    +----------+ |(Payload)| |(Pentest)| |(Report)|
+         +-----------+ +---+-----+  +----+----+ +----+----+ +---+---+
+         |ReconMaster| |VulnHunter| |Payload  | |Shadow   | |Report  |
+         |(Recon)    | |(Vuln)    | |Smith    | |Ops      | |Master  |
+                                    |(Payload)| |(Pentest)| |(Report)|
 
 ```
 
@@ -74,8 +74,6 @@ docker compose up --build
 - SQLite (results storage)
 - Nmap, requests, BeautifulSoup, aiosqlite, pydantic, etc.
 
-## License
-MIT License. See [LICENSE](LICENSE) for details.
 
 ## Disclaimer
 Guardian-AI is intended for authorized security testing and educational purposes only. **Do not use against systems without explicit permission.**
