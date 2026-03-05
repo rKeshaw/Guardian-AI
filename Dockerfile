@@ -1,39 +1,60 @@
-FROM python:3.11-slim
+# guardian/Dockerfile
 
-WORKDIR /app
+# ── Stage 1: Builder ──────────────────────────────────────────────────────────
+FROM python:3.11-slim AS builder
 
-# Install system dependencies with error handling
-RUN apt-get update && apt-get install -y \
-    nmap \
-    dnsutils \
-    curl \
-    git \
-    sqlite3 \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+WORKDIR /build
 
-# Copy requirements and install Python dependencies
+# System deps for building Python packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    libssl-dev \
+    libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create an isolated venv so runtime stage can copy just /venv
+RUN python -m venv /venv
+ENV PATH="/venv/bin:$PATH"
+
+# Copy and install dependencies first (layer-cached when requirements.txt unchanged)
 COPY requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM python:3.11-slim AS runtime
+
+WORKDIR /app
+
+# Runtime system deps only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nmap \
+    curl \
+    dnsutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy venv from builder — no compiler toolchain in runtime image
+COPY --from=builder /venv /venv
+ENV PATH="/venv/bin:$PATH"
+
 # Copy application code
-COPY . .
+COPY guardian/ ./guardian/
+COPY data/      ./data/
 
+# Prepare log and data directories with correct permissions
+RUN mkdir -p /app/logs /app/data && \
+    chmod 755 /app/logs /app/data
 
-# Create necessary directories with proper permissions
-RUN mkdir -p data logs && \
-    chmod 755 data logs
-
-# Set environment variables
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
-ENV GUARDIAN_PORT=8888
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8888/api/v1/health || exit 1
+# Non-root user for security
+RUN useradd -r -s /bin/false -u 1000 guardian && \
+    chown -R guardian:guardian /app
+USER guardian
 
 EXPOSE 8888
 
-CMD ["uvicorn", "guardian.api.main:app", "--host", "0.0.0.0", "--port", "8888"]
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
+    CMD curl -sf http://localhost:8888/api/v1/health || exit 1
+
+CMD ["python", "-m", "uvicorn", "guardian.api.main:app", \
+     "--host", "0.0.0.0", "--port", "8888", "--workers", "1"]
