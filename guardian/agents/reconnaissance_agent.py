@@ -1,598 +1,665 @@
+"""
+guardian/agents/reconnaissance_agent.py
+"""
+
 import asyncio
-import json
 import logging
-import subprocess
-import socket
-import requests
-from typing import Dict, List, Any, Optional
-from urllib.parse import urlparse, urljoin
-import dns.resolver
-from bs4 import BeautifulSoup
-import random
-import time
-import urllib3
 import os
+import random
+import socket
+import ssl
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+from urllib.parse import urljoin, urlparse
+
+import aiohttp
+import dns.resolver
 import nmap
+from bs4 import BeautifulSoup
 
 from guardian.agents.base_agent import BaseAgent
 from guardian.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# One shared thread-pool for all nmap / legacy-blocking calls
+_BLOCKING_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="recon-blocking")
+
+# Maximum parallel DNS resolutions
+MAX_DNS_CONCURRENCY = 50
+
+# Maximum parallel HTTP requests during crawl / subdomain service checks
+MAX_HTTP_CONCURRENCY = 20
+
+
+def _build_ssl_context() -> ssl.SSLContext | bool:
+    """
+    Return an ssl.SSLContext if VERIFY_SSL is True (optionally loading a
+    custom CA bundle), or False to disable verification entirely.
+    Setting VERIFY_SSL=False emits a startup warning.
+    """
+    if not settings.VERIFY_SSL:
+        logger.warning(
+            "SSL verification is DISABLED (VERIFY_SSL=False). "
+            "This exposes reconnaissance traffic to MITM attacks."
+        )
+        return False
+
+    ctx = ssl.create_default_context()
+    if settings.CA_BUNDLE_PATH and os.path.exists(settings.CA_BUNDLE_PATH):
+        ctx.load_verify_locations(cafile=settings.CA_BUNDLE_PATH)
+        logger.debug("Loaded custom CA bundle from %s", settings.CA_BUNDLE_PATH)
+    return ctx
+
+
+# Build once at import time — all aiohttp sessions in this module reuse it
+_SSL_CONTEXT = _build_ssl_context()
+
+
+def _make_connector() -> aiohttp.TCPConnector:
+    return aiohttp.TCPConnector(
+        ssl=_SSL_CONTEXT,
+        limit=MAX_HTTP_CONCURRENCY,
+        limit_per_host=5,
+        enable_cleanup_closed=True,
+    )
+
+
 class ReconnaissanceAgent(BaseAgent):
     """
-    Agent 1: Elite Reconnaissance and Intelligence Gathering
-    
-    Full Capabilities:
-    - Advanced subdomain enumeration
-    - Technology stack fingerprinting  
-    - Port scanning with service detection
-    - Intelligent web crawling
-    - DNS enumeration and analysis
-    - Attack surface mapping
+    Agent 1 — Elite Reconnaissance and Intelligence Gathering.
+
+    Capabilities:
+      - Subdomain enumeration (wordlist + CT logs, with wildcard guard)
+      - Technology stack fingerprinting
+      - Non-blocking Nmap port scanning
+      - Async web application crawling
+      - DNS intelligence gathering
+      - SSL/TLS certificate analysis
+      - Attack surface scoring
     """
-    
-    def __init__(self, db):
+
+    def __init__(self, db) -> None:
         super().__init__(db, "ReconnaissanceAgent")
-        self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-        ]
-    
-    async def execute(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute comprehensive reconnaissance with full capabilities"""
+        self._user_agents: list[str] = settings.USER_AGENTS
+
+    # ── Entry point ───────────────────────────
+
+    async def execute(self, task_data: dict[str, Any]) -> dict[str, Any]:
         task_id = await self._start_task(task_data)
         session_id = task_data.get("session_id", "unknown")
-        
+
         try:
-            targets = task_data.get("targets", [])
-            config = task_data.get("config", {})
-            
-            logger.info(f"🔍 ReconMaster initiating elite reconnaissance on {len(targets)} targets")
-            
-            results = {
+            targets: list[str] = task_data.get("targets", [])
+            config: dict[str, Any] = task_data.get("config", {})
+            logger.info("Reconnaissance starting targets=%s", targets)
+
+            results: dict[str, Any] = {
                 "task_id": task_id,
                 "agent_name": "ReconMaster",
                 "targets_analyzed": len(targets),
                 "reconnaissance_data": {},
-                "intelligence_summary": {}
+                "intelligence_summary": {},
             }
-            
-            # Process each target with full reconnaissance
-            for target_url in targets:
-                logger.info(f"🎯 Analyzing target: {target_url}")
-                target_intel = await self._comprehensive_target_analysis(target_url, config)
-                results["reconnaissance_data"][target_url] = target_intel
-            
-            # Generate intelligence summary
-            results["intelligence_summary"] = self._generate_intelligence_summary(results["reconnaissance_data"])
-            
-            await self._complete_task(results, session_id)
-            logger.info(f"✅ ReconMaster completed reconnaissance of {len(targets)} targets")
-            return results
-            
-        except Exception as e:
-            await self._handle_error(e, session_id)
-            raise
-    
-    async def _comprehensive_target_analysis(self, target_url: str, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Comprehensive target analysis with all reconnaissance techniques"""
-        
-        parsed_url = urlparse(target_url)
-        domain = parsed_url.netloc
-        
-        # Execute reconnaissance tasks concurrently
-        tasks = [
-            self._subdomain_enumeration(domain),
-            self._technology_stack_analysis(target_url),
-            self._port_reconnaissance(domain),
-            self._web_application_mapping(target_url, config.get("crawl_depth", 2)),
-            self._dns_intelligence(domain),
-            self._certificate_analysis(domain)
-        ]
-        
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        target_intel = {
-            "domain": domain,
-            "target_url": target_url,
-            "subdomains": results[0] if not isinstance(results[0], Exception) else [],
-            "technologies": results[1] if not isinstance(results[1], Exception) else {},
-            "open_ports": results[2] if not isinstance(results[2], Exception) else [],
-            "web_applications": results[3] if not isinstance(results[3], Exception) else {},
-            "dns_intelligence": results[4] if not isinstance(results[4], Exception) else {},
-            "certificates": results[5] if not isinstance(results[5], Exception) else {},
-            "analysis_timestamp": time.time(),
-            "attack_surface_score": 0
-        }
-        
-        # Calculate attack surface score
-        target_intel["attack_surface_score"] = self._calculate_attack_surface_score(target_intel)
-        
-        return target_intel
-    
-    async def _subdomain_enumeration(self, domain: str) -> List[Dict[str, Any]]:
-        """Advanced subdomain enumeration using an external wordlist."""
-        logger.info(f"🔎 Enumerating subdomains for {domain} using comprehensive wordlist...")
-        
-        discovered_subdomains = []
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        wordlist_path = os.path.join(current_dir, "..", "data", "subdomain_wordlist.txt")
 
+            # Analyse all targets concurrently (each target is already async-heavy)
+            analyses = await asyncio.gather(
+                *[self._comprehensive_target_analysis(t, config) for t in targets],
+                return_exceptions=True,
+            )
+
+            for target_url, analysis in zip(targets, analyses):
+                if isinstance(analysis, Exception):
+                    logger.error("Target analysis failed target=%s error=%s", target_url, analysis)
+                    results["reconnaissance_data"][target_url] = {"error": str(analysis)}
+                else:
+                    results["reconnaissance_data"][target_url] = analysis
+
+            results["intelligence_summary"] = self._generate_intelligence_summary(
+                results["reconnaissance_data"]
+            )
+
+            await self._complete_task(results, session_id)
+            logger.info("Reconnaissance complete targets=%d", len(targets))
+            return results
+
+        except Exception as exc:
+            await self._handle_error(exc, session_id)
+            raise
+
+    # ── Per-target orchestration ──────────────
+
+    async def _comprehensive_target_analysis(
+        self, target_url: str, config: dict[str, Any]
+    ) -> dict[str, Any]:
+        parsed = urlparse(target_url)
+        domain = parsed.netloc or parsed.path  # handle bare domains too
+
+        async with aiohttp.ClientSession(
+            connector=_make_connector(),
+            headers={"User-Agent": random.choice(self._user_agents)},
+            timeout=aiohttp.ClientTimeout(total=30, connect=10),
+        ) as session:
+            tasks = [
+                self._subdomain_enumeration(domain, session),
+                self._technology_stack_analysis(target_url, session),
+                self._port_reconnaissance(domain),
+                self._web_application_mapping(target_url, session, config.get("crawl_depth", 2)),
+                self._dns_intelligence(domain),
+                self._certificate_analysis(domain, session),
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        def safe(r, default):
+            return r if not isinstance(r, Exception) else (
+                logger.debug("Recon subtask failed: %s", r) or default
+            )
+
+        intel = {
+            "domain":           domain,
+            "target_url":       target_url,
+            "subdomains":       safe(results[0], []),
+            "technologies":     safe(results[1], {}),
+            "open_ports":       safe(results[2], []),
+            "web_applications": safe(results[3], {}),
+            "dns_intelligence": safe(results[4], {}),
+            "certificates":     safe(results[5], {}),
+            "analysis_timestamp": time.time(),
+            "attack_surface_score": 0.0,
+        }
+        intel["attack_surface_score"] = self._calculate_attack_surface_score(intel)
+        return intel
+
+    # ── Subdomain enumeration ─────────────────
+
+    async def _subdomain_enumeration(
+        self, domain: str, session: aiohttp.ClientSession
+    ) -> list[dict[str, Any]]:
+        logger.info("Subdomain enumeration starting domain=%s", domain)
+
+        # Step 1: wildcard guard
+        if await self._has_wildcard_dns(domain):
+            logger.warning(
+                "Wildcard DNS detected on %s — brute-force skipped to avoid false positives",
+                domain,
+            )
+            return [{"note": "wildcard_dns_detected", "domain": domain}]
+
+        # Step 2: wordlist brute-force (parallel, semaphore-gated)
+        wordlist = self._load_subdomain_wordlist()
+        sem = asyncio.Semaphore(MAX_DNS_CONCURRENCY)
+        loop = asyncio.get_running_loop()
+
+        async def resolve_one(sub: str) -> dict[str, Any] | None:
+            fqdn = f"{sub}.{domain}"
+            async with sem:
+                try:
+                    infos = await loop.getaddrinfo(fqdn, None)
+                    ip = infos[0][4][0]
+                    services = await self._check_subdomain_services(fqdn, session)
+                    return {
+                        "subdomain": fqdn,
+                        "ip_address": ip,
+                        "discovery_method": "wordlist_bruteforce",
+                        "status": "active",
+                        "services": services,
+                    }
+                except (socket.gaierror, OSError):
+                    return None
+
+        bf_results = await asyncio.gather(*[resolve_one(s) for s in wordlist])
+        discovered = [r for r in bf_results if r is not None]
+
+        # Step 3: CT log query (merges additional subdomains)
+        ct_results = await self._certificate_transparency_search(domain, session)
+
+        # Deduplicate by subdomain name
+        seen: set[str] = {r["subdomain"] for r in discovered}
+        for ct in ct_results:
+            if ct["subdomain"] not in seen:
+                discovered.append(ct)
+                seen.add(ct["subdomain"])
+
+        logger.info("Subdomain enumeration done domain=%s found=%d", domain, len(discovered))
+        return discovered
+
+    async def _has_wildcard_dns(self, domain: str) -> bool:
+        """
+        Resolve a guaranteed-nonexistent label to detect wildcard DNS.
+        If the probe resolves, every brute-force result would be a false positive.
+        """
+        probe = f"guardian-ai-wildcard-probe-{random.randint(100000, 999999)}.{domain}"
+        loop = asyncio.get_running_loop()
         try:
-            with open(wordlist_path, "r") as f:
-                subdomain_list = [line.strip() for line in f if line.strip()]
-            logger.info(f"Loaded {len(subdomain_list)} subdomains from wordlist.")
+            await loop.getaddrinfo(probe, None)
+            return True  # resolved → wildcard exists
+        except (socket.gaierror, OSError):
+            return False
+
+    def _load_subdomain_wordlist(self) -> list[str]:
+        wordlist_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "data", "subdomain_wordlist.txt",
+        )
+        try:
+            with open(wordlist_path) as fh:
+                return [line.strip() for line in fh if line.strip()]
         except FileNotFoundError:
-            logger.error(f"Subdomain wordlist not found at {wordlist_path}. Skipping enumeration.")
+            logger.warning("Subdomain wordlist not found at %s", wordlist_path)
             return []
 
-        # Test subdomains from the wordlist
-        for sub in subdomain_list:
-            subdomain = f"{sub}.{domain}"
-            try:
-                # Use asyncio's non-blocking DNS resolution
-                loop = asyncio.get_event_loop()
-                ip_address = (await loop.getaddrinfo(subdomain, None))[0][4][0]
-                
-                subdomain_info = {
-                    "subdomain": subdomain,
-                    "ip_address": ip_address,
-                    "discovery_method": "wordlist_bruteforce",
-                    "status": "active"
-                }
-                
-                subdomain_info["services"] = await self._check_subdomain_services(subdomain)
-                discovered_subdomains.append(subdomain_info)
-                logger.debug(f"🎯 Found active subdomain: {subdomain} -> {ip_address}")
-                
-            except socket.gaierror:
-                continue # Subdomain does not exist
-            except Exception as e:
-                logger.debug(f"Error resolving {subdomain}: {e}")
-
-        logger.info(f"✅ Discovered {len(discovered_subdomains)} subdomains for {domain}")
-        return discovered_subdomains
-    
-    def create_secure_session(self) -> requests.Session:
-        """Create a requests Session with security configurations"""
-        session = requests.Session()
-        # Configure session with secure defaults
-        session.verify = True  # Enable SSL verification
-        session.headers.update({
-            'Connection': 'close',  # Don't keep connections alive
-        })
-        # Disable SSL verification warnings
-        # import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        return session
-    
-    async def _check_subdomain_services(self, subdomain: str) -> List[Dict[str, Any]]:
-        """Check HTTP/HTTPS services on subdomain"""
+    async def _check_subdomain_services(
+        self, subdomain: str, session: aiohttp.ClientSession
+    ) -> list[dict[str, Any]]:
         services = []
-        session = self.create_secure_session()
-        
-        for protocol in ["http", "https"]:
+        for scheme in ("http", "https"):
+            url = f"{scheme}://{subdomain}"
             try:
-                url = f"{protocol}://{subdomain}"
-                response = session.get(
-                    url, 
-                    timeout=5,
-                    headers={"User-Agent": random.choice(self.user_agents)},
-                    verify=False
-                )
-                
-                services.append({
-                    "protocol": protocol,
-                    "status_code": response.status_code,
-                    "server": response.headers.get("Server", "Unknown"),
-                    "title": self._extract_title(response.text) if response.status_code == 200 else None
-                })
-            except requests.RequestException as e:
-                # Log failed attempts but continue checking
-                services.append({
-                    "protocol": protocol,
-                    "error": str(e)
-                })
-                
-        return services
-    
-    def _extract_title(self, html_content: str) -> str:
-        """Extract page title from HTML"""
-        try:
-            soup = BeautifulSoup(html_content, 'html.parser')
-            title_tag = soup.find('title')
-            return title_tag.get_text().strip() if title_tag else "No Title"
-        except:
-            return "Unknown"
-    
-    async def _certificate_transparency_search(self, domain: str) -> List[Dict[str, Any]]:
-        """Simulated certificate transparency log search"""
-        # In real implementation, would query CT logs like crt.sh
-        # For now, simulate finding a few additional subdomains
-        simulated_ct_results = []
-        
-        ct_candidates = [f"mail.{domain}", f"smtp.{domain}", f"mx.{domain}"]
-        
-        for candidate in ct_candidates:
-            try:
-                ip_address = socket.gethostbyname(candidate)
-                simulated_ct_results.append({
-                    "subdomain": candidate,
-                    "ip_address": ip_address,
-                    "discovery_method": "certificate_transparency",
-                    "status": "active",
-                    "services": await self._check_subdomain_services(candidate)
-                })
-            except socket.gaierror:
-                continue
-        
-        return simulated_ct_results
-    
-    async def _technology_stack_analysis(self, target_url: str) -> Dict[str, Any]:
-        """Advanced technology stack fingerprinting"""
-        logger.info(f"🔍 Analyzing technology stack for {target_url}")
-        
-        technologies = {
-            "web_servers": [],
-            "frameworks": [],
-            "cms": [],
-            "programming_languages": [],
-            "databases": [],
-            "cdn": [],
-            "analytics": [],
-            "security": []
-        }
-        
-        try:
-            response = requests.get(target_url, timeout=10, headers={
-                "User-Agent": random.choice(self.user_agents)
-            })
-            
-            headers = response.headers
-            content = response.text
-            
-            # Server identification
-            server_header = headers.get('Server', '')
-            if server_header:
-                technologies["web_servers"].append({
-                    "name": server_header,
-                    "confidence": "high",
-                    "source": "server_header"
-                })
-            
-            # Framework detection
-            framework_indicators = {
-                'X-Powered-By': 'frameworks',
-                'X-AspNet-Version': 'frameworks',
-                'X-Generator': 'cms'
-            }
-            
-            for header, category in framework_indicators.items():
-                if header in headers:
-                    technologies[category].append({
-                        "name": headers[header],
-                        "confidence": "high", 
-                        "source": f"{header.lower()}_header"
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    text = await resp.text(errors="replace")
+                    services.append({
+                        "protocol": scheme,
+                        "status_code": resp.status,
+                        "server": resp.headers.get("Server", "Unknown"),
+                        "title": self._extract_title(text) if resp.status == 200 else None,
                     })
-            
-            # Content analysis for technology fingerprinting
-            content_indicators = {
-                'wordpress': ('cms', ['wp-content', 'wp-includes']),
-                'drupal': ('cms', ['drupal', 'sites/default']),
-                'joomla': ('cms', ['joomla', 'components/com_']),
-                'react': ('frameworks', ['react', '_react']),
-                'angular': ('frameworks', ['angular', 'ng-']),
-                'vue': ('frameworks', ['vue.js', '__vue__']),
-                'jquery': ('frameworks', ['jquery', '$.fn.jquery']),
-                'bootstrap': ('frameworks', ['bootstrap', 'btn-primary']),
-                'php': ('programming_languages', ['<?php', '.php']),
-                'asp.net': ('frameworks', ['__doPostBack', 'aspnet']),
-                'cloudflare': ('cdn', ['cloudflare', '__cf_bm']),
-                'google-analytics': ('analytics', ['google-analytics', 'gtag'])
-            }
-            
-            content_lower = content.lower()
-            for tech, (category, indicators) in content_indicators.items():
-                for indicator in indicators:
-                    if indicator in content_lower:
-                        technologies[category].append({
-                            "name": tech,
-                            "confidence": "medium",
-                            "source": "content_analysis"
-                        })
-                        break
-            
-        except requests.RequestException as e:
-            logger.debug(f"Technology analysis failed for {target_url}: {e}")
-        
-        return technologies
-    
-    async def _port_reconnaissance(self, domain: str) -> List[Dict[str, Any]]:
-        """Advanced port scanning using the Nmap engine."""
-        logger.info(f"🔍 Performing Nmap port reconnaissance on {domain}")
-        
-        discovered_ports = []
+            except Exception as exc:
+                services.append({"protocol": scheme, "error": str(exc)})
+        return services
+
+    # ── CT log integration ────────────────────
+
+    async def _certificate_transparency_search(
+        self, domain: str, session: aiohttp.ClientSession
+    ) -> list[dict[str, Any]]:
+        """
+        Query the real crt.sh JSON API for certificate transparency log entries.
+        Returns unique subdomains not resolvable — caller deduplicates.
+        """
+        url = f"https://crt.sh/?q=%.{domain}&output=json"
+        discovered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
         try:
-            nm = nmap.PortScanner()
-            # -F flag scans the 100 most common ports. -T4 is for faster execution.
-            scan_results = nm.scan(hosts=domain, arguments='-F -T4')
-            
-            # The nmap library returns a complex dict; we need to parse it
-            if domain in scan_results['scan']:
-                if 'tcp' in scan_results['scan'][domain]:
-                    tcp_ports = scan_results['scan'][domain]['tcp']
-                    for port, port_data in tcp_ports.items():
-                        if port_data['state'] == 'open':
-                            discovered_ports.append({
-                                "port": port,
-                                "state": port_data['state'],
-                                "service": port_data['name'],
-                                "banner": f"{port_data.get('product', '')} {port_data.get('version', '')}"
-                            })
-                            logger.debug(f"🎯 Nmap found open port: {port} ({port_data['name']})")
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=20)
+            ) as resp:
+                if resp.status != 200:
+                    logger.debug("crt.sh returned status=%d for domain=%s", resp.status, domain)
+                    return []
+                entries = await resp.json(content_type=None)
 
-        except Exception as e:
-            logger.error(f"Nmap scan failed for {domain}: {e}. This might happen if nmap is not installed or due to permissions.")
+            loop = asyncio.get_running_loop()
+            sem = asyncio.Semaphore(MAX_DNS_CONCURRENCY)
 
-        logger.info(f"✅ Nmap scan complete. Found {len(discovered_ports)} open ports on {domain}")
-        return discovered_ports
-    
-    def _identify_service(self, port: int) -> str:
-        """Identify service based on port number"""
-        service_map = {
-            21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
-            80: "HTTP", 110: "POP3", 143: "IMAP", 443: "HTTPS",
-            993: "IMAPS", 995: "POP3S", 8080: "HTTP-ALT", 8443: "HTTPS-ALT",
-            3306: "MySQL", 5432: "PostgreSQL", 27017: "MongoDB",
-            6379: "Redis", 11211: "Memcached", 9200: "Elasticsearch"
+            subdomains_from_ct: set[str] = set()
+            for entry in entries:
+                for name in entry.get("name_value", "").splitlines():
+                    name = name.strip().lstrip("*.")
+                    if name.endswith(f".{domain}") or name == domain:
+                        subdomains_from_ct.add(name)
+
+            async def resolve_ct(fqdn: str) -> dict[str, Any] | None:
+                if fqdn in seen:
+                    return None
+                async with sem:
+                    try:
+                        infos = await loop.getaddrinfo(fqdn, None)
+                        ip = infos[0][4][0]
+                        return {
+                            "subdomain": fqdn,
+                            "ip_address": ip,
+                            "discovery_method": "certificate_transparency",
+                            "status": "active",
+                            "services": [],
+                        }
+                    except (socket.gaierror, OSError):
+                        return None
+
+            results = await asyncio.gather(*[resolve_ct(s) for s in subdomains_from_ct])
+            for r in results:
+                if r and r["subdomain"] not in seen:
+                    discovered.append(r)
+                    seen.add(r["subdomain"])
+
+            logger.info("CT log query done domain=%s ct_found=%d", domain, len(discovered))
+
+        except Exception as exc:
+            logger.warning("CT log query failed domain=%s error=%s", domain, exc)
+
+        return discovered
+
+    # ── Technology fingerprinting ─────────────
+
+    async def _technology_stack_analysis(
+        self, target_url: str, session: aiohttp.ClientSession
+    ) -> dict[str, Any]:
+        logger.debug("Technology fingerprinting target=%s", target_url)
+        technologies: dict[str, list] = {
+            "web_servers": [], "frameworks": [], "cms": [],
+            "programming_languages": [], "databases": [],
+            "cdn": [], "analytics": [], "security": [],
         }
-        return service_map.get(port, f"Unknown-{port}")
-    
-    async def _grab_banner(self, domain: str, port: int) -> str:
-        """Attempt to grab service banner"""
+
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            sock.connect((domain, port))
-            
-            # Send HTTP request for web ports
-            if port in [80, 8080, 8000, 8001]:
-                sock.send(b"GET / HTTP/1.1\r\nHost: " + domain.encode() + b"\r\n\r\n")
-            
-            banner = sock.recv(1024).decode('utf-8', errors='ignore').strip()
-            sock.close()
-            return banner[:200]  # Limit banner length
-            
-        except:
-            return "No banner"
-    
-    async def _web_application_mapping(self, target_url: str, max_depth: int = 2) -> Dict[str, Any]:
-        """Intelligent web application mapping and endpoint discovery with deduplication."""
-        logger.info(f"🗺️ Mapping web application: {target_url}")
-        
-        discovered_endpoints = set()
-        discovered_forms = []
-        discovered_files = []
-        to_crawl = [(target_url, 0)]
-        crawled = set()
-        
-        # --- NEW: Set to store unique form signatures ---
-        seen_forms = set()
+            async with session.get(
+                target_url, timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                headers = dict(resp.headers)
+                content = await resp.text(errors="replace")
 
-        while to_crawl and len(crawled) < 50:
-            current_url, depth = to_crawl.pop(0)
-            
-            if current_url in crawled or depth > max_depth:
-                continue
-                
-            crawled.add(current_url)
-            
+            server = headers.get("Server", "")
+            if server:
+                technologies["web_servers"].append(
+                    {"name": server, "confidence": "high", "source": "server_header"}
+                )
+
+            for header, category in [
+                ("X-Powered-By", "frameworks"),
+                ("X-AspNet-Version", "frameworks"),
+                ("X-Generator", "cms"),
+            ]:
+                if header in headers:
+                    technologies[category].append(
+                        {"name": headers[header], "confidence": "high", "source": f"{header.lower()}_header"}
+                    )
+
+            content_lower = content.lower()
+            content_indicators = {
+                "wordpress":       ("cms",                  ["wp-content", "wp-includes"]),
+                "drupal":          ("cms",                  ["drupal", "sites/default"]),
+                "joomla":          ("cms",                  ["joomla", "components/com_"]),
+                "react":           ("frameworks",           ["react", "_react"]),
+                "angular":         ("frameworks",           ["angular", "ng-"]),
+                "vue":             ("frameworks",           ["vue.js", "__vue__"]),
+                "jquery":          ("frameworks",           ["jquery"]),
+                "bootstrap":       ("frameworks",           ["bootstrap"]),
+                "php":             ("programming_languages", ["<?php", ".php"]),
+                "asp.net":         ("frameworks",           ["__doPostBack", "aspnet"]),
+                "cloudflare":      ("cdn",                  ["cloudflare", "__cf_bm"]),
+                "google-analytics":("analytics",            ["google-analytics", "gtag"]),
+            }
+            for tech, (category, indicators) in content_indicators.items():
+                if any(ind in content_lower for ind in indicators):
+                    technologies[category].append(
+                        {"name": tech, "confidence": "medium", "source": "content_analysis"}
+                    )
+
+        except Exception as exc:
+            logger.debug("Technology analysis failed target=%s error=%s", target_url, exc)
+
+        return technologies
+
+    # ── Port scanning (non-blocking) ──────────
+
+    async def _port_reconnaissance(self, domain: str) -> list[dict[str, Any]]:
+        """
+        Run nmap in a thread-pool executor so the event loop is never blocked.
+        nmap.PortScanner.scan() is a synchronous call that can take 30-120 seconds
+        — it must never be called directly in an async context.
+        """
+        logger.info("Port scan starting domain=%s", domain)
+        loop = asyncio.get_running_loop()
+
+        def _run_nmap() -> list[dict[str, Any]]:
+            scanner = nmap.PortScanner()
             try:
-                response = requests.get(current_url, timeout=10, headers={
-                    "User-Agent": random.choice(self.user_agents)
-                })
-                
-                if response.status_code == 200:
-                    discovered_endpoints.add(current_url)
-                    soup = BeautifulSoup(response.content, 'html.parser')
-                    
-                    if depth < max_depth:
-                        for link in soup.find_all('a', href=True):
-                            href = link['href']
-                            full_url = urljoin(current_url, href)
-                            if urlparse(full_url).netloc == urlparse(target_url).netloc:
-                                to_crawl.append((full_url, depth + 1))
-                    
-                    # --- REFACTORED FORM DISCOVERY LOGIC ---
-                    for form in soup.find_all('form'):
-                        form_action = urljoin(current_url, form.get('action', ''))
-                        input_names = sorted([inp.get('name', '') for inp in form.find_all(['input', 'textarea', 'select'])])
-                        
-                        # Create a unique signature for the form
-                        form_signature = (form_action, tuple(input_names))
+                scanner.scan(hosts=domain, arguments="-F -T4 --open")
+            except Exception as exc:
+                logger.error("nmap scan failed domain=%s error=%s", domain, exc)
+                return []
 
-                        # If we haven't seen this signature before, process and store the form
-                        if form_signature not in seen_forms:
-                            seen_forms.add(form_signature)
-                            
-                            form_info = {
-                                "action": form_action,
-                                "method": form.get('method', 'GET').upper(),
-                                "inputs": []
+            ports: list[dict[str, Any]] = []
+            host_data = scanner["scan"].get(domain, {})
+            for port, data in host_data.get("tcp", {}).items():
+                if data.get("state") == "open":
+                    ports.append({
+                        "port": port,
+                        "state": "open",
+                        "service": data.get("name", "unknown"),
+                        "banner": f"{data.get('product', '')} {data.get('version', '')}".strip(),
+                    })
+            return ports
+
+        try:
+            ports = await loop.run_in_executor(_BLOCKING_EXECUTOR, _run_nmap)
+            logger.info("Port scan done domain=%s open_ports=%d", domain, len(ports))
+            return ports
+        except Exception as exc:
+            logger.error("Port scan executor error domain=%s error=%s", domain, exc)
+            return []
+
+    # ── Web application crawler ───────────────
+
+    async def _web_application_mapping(
+        self,
+        target_url: str,
+        session: aiohttp.ClientSession,
+        max_depth: int = 2,
+    ) -> dict[str, Any]:
+        """
+        Async BFS crawler.  All HTTP calls use the shared aiohttp session —
+        no synchronous requests.get() anywhere in this path.
+        """
+        logger.debug("Web crawl starting target=%s depth=%d", target_url, max_depth)
+
+        discovered_endpoints: set[str] = set()
+        discovered_forms: list[dict] = []
+        interesting_files: list[dict] = []
+        seen_forms: set[tuple] = set()
+
+        queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
+        await queue.put((target_url, 0))
+        crawled: set[str] = set()
+        sem = asyncio.Semaphore(MAX_HTTP_CONCURRENCY)
+
+        base_netloc = urlparse(target_url).netloc
+
+        async def crawl_one(url: str, depth: int) -> None:
+            if url in crawled or depth > max_depth:
+                return
+            crawled.add(url)
+
+            async with sem:
+                try:
+                    async with session.get(
+                        url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=True
+                    ) as resp:
+                        if resp.status != 200:
+                            return
+                        content = await resp.read()
+                except Exception as exc:
+                    logger.debug("Crawl failed url=%s error=%s", url, exc)
+                    return
+
+            discovered_endpoints.add(url)
+            soup = BeautifulSoup(content, "html.parser")
+
+            # Enqueue same-origin links
+            if depth < max_depth:
+                for tag in soup.find_all("a", href=True):
+                    full = urljoin(url, tag["href"])
+                    if urlparse(full).netloc == base_netloc and full not in crawled:
+                        await queue.put((full, depth + 1))
+
+            # Extract unique forms
+            for form in soup.find_all("form"):
+                action = urljoin(url, form.get("action", ""))
+                inputs = sorted(
+                    inp.get("name", "") for inp in form.find_all(["input", "textarea", "select"])
+                )
+                sig = (action, tuple(inputs))
+                if sig not in seen_forms:
+                    seen_forms.add(sig)
+                    discovered_forms.append({
+                        "action": action,
+                        "method": form.get("method", "GET").upper(),
+                        "inputs": [
+                            {
+                                "name": t.get("name", ""),
+                                "type": t.get("type", "text"),
+                                "required": t.has_attr("required"),
                             }
-                            for input_tag in form.find_all(['input', 'textarea', 'select']):
-                                form_info["inputs"].append({
-                                    "name": input_tag.get('name', ''),
-                                    "type": input_tag.get('type', 'text'),
-                                    "required": input_tag.has_attr('required')
-                                })
-                            discovered_forms.append(form_info)
-                    # -------------------------------------------
+                            for t in form.find_all(["input", "textarea", "select"])
+                        ],
+                    })
 
-                    interesting_patterns = ['admin', 'login', 'dashboard', 'api', 'config', 'backup', 'upload', 'download', 'search']
-                    for pattern in interesting_patterns:
-                        if pattern in response.text.lower():
-                            discovered_files.append({
-                                "url": current_url,
-                                "pattern": pattern,
-                                "context": "content_reference"
-                            })
-                
-                await asyncio.sleep(0.5)
-            
-            except requests.RequestException as e:
-                logger.debug(f"Failed to crawl {current_url}: {e}")
-        
+            # Flag pages referencing interesting patterns
+            text_lower = content.decode(errors="replace").lower()
+            for pattern in ["admin", "login", "dashboard", "api", "config", "backup", "upload"]:
+                if pattern in text_lower:
+                    interesting_files.append({"url": url, "pattern": pattern})
+
+        # Drain the BFS queue with bounded concurrency
+        tasks: list[asyncio.Task] = []
+        while not queue.empty() or tasks:
+            while not queue.empty() and len(tasks) < MAX_HTTP_CONCURRENCY:
+                url, depth = await queue.get()
+                if len(crawled) >= 100:
+                    break
+                tasks.append(asyncio.create_task(crawl_one(url, depth)))
+            if tasks:
+                done, pending = await asyncio.wait(tasks, timeout=1.0, return_when=asyncio.FIRST_COMPLETED)
+                tasks = list(pending)
+
+        # Await any remaining tasks
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
         return {
             "endpoints": list(discovered_endpoints),
             "forms": discovered_forms,
-            "interesting_files": discovered_files,
+            "interesting_files": interesting_files,
             "crawl_statistics": {
                 "pages_crawled": len(crawled),
-                "forms_found": len(discovered_forms), # This will now be the unique count
-                "endpoints_discovered": len(discovered_endpoints)
-            }
+                "forms_found": len(discovered_forms),
+                "endpoints_discovered": len(discovered_endpoints),
+            },
         }
-    
-    async def _dns_intelligence(self, domain: str) -> Dict[str, Any]:
-        """Advanced DNS intelligence gathering"""
-        logger.info(f"🔍 Gathering DNS intelligence for {domain}")
-        
-        dns_records = {}
-        record_types = ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT', 'SOA']
-        
-        for record_type in record_types:
-            try:
-                answers = dns.resolver.resolve(domain, record_type)
-                dns_records[record_type] = [str(answer) for answer in answers]
-            except:
-                dns_records[record_type] = []
-        
-        # Additional DNS analysis
-        dns_intelligence = {
+
+    # ── DNS intelligence ──────────────────────
+
+    async def _dns_intelligence(self, domain: str) -> dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        record_types = ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA"]
+        dns_records: dict[str, list] = {}
+
+        def query_all() -> dict[str, list]:
+            records: dict[str, list] = {}
+            for rtype in record_types:
+                try:
+                    answers = dns.resolver.resolve(domain, rtype, lifetime=5)
+                    records[rtype] = [str(a) for a in answers]
+                except Exception:
+                    records[rtype] = []
+            return records
+
+        dns_records = await loop.run_in_executor(_BLOCKING_EXECUTOR, query_all)
+
+        return {
             "records": dns_records,
-            "nameservers": dns_records.get('NS', []),
-            "mail_servers": dns_records.get('MX', []),
-            "txt_analysis": self._analyze_txt_records(dns_records.get('TXT', [])),
-            "subdomain_takeover_risk": self._check_subdomain_takeover_risk(dns_records)
+            "nameservers": dns_records.get("NS", []),
+            "mail_servers": dns_records.get("MX", []),
+            "txt_analysis": self._analyze_txt_records(dns_records.get("TXT", [])),
+            "subdomain_takeover_risk": self._check_subdomain_takeover_risk(dns_records),
         }
-        
-        return dns_intelligence
-    
-    def _analyze_txt_records(self, txt_records: List[str]) -> Dict[str, Any]:
-        """Analyze TXT records for security and service information"""
-        analysis = {
+
+    # ── Certificate analysis ──────────────────
+
+    async def _certificate_analysis(
+        self, domain: str, session: aiohttp.ClientSession
+    ) -> dict[str, Any]:
+        cert_info: dict[str, Any] = {
+            "has_certificate": False,
+            "issuer": "Unknown",
+            "certificate_transparency": False,
+        }
+        try:
+            async with session.get(
+                f"https://{domain}", timeout=aiohttp.ClientTimeout(total=8)
+            ) as resp:
+                if resp.status:
+                    cert_info["has_certificate"] = True
+                    cert_info["certificate_transparency"] = True
+        except Exception:
+            pass
+        return cert_info
+
+    # ── Utilities ─────────────────────────────
+
+    def _extract_title(self, html: str) -> str:
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            tag = soup.find("title")
+            return tag.get_text().strip() if tag else "No Title"
+        except Exception:
+            return "Unknown"
+
+    def _analyze_txt_records(self, txt_records: list[str]) -> dict[str, Any]:
+        analysis: dict[str, Any] = {
             "spf_record": None,
             "dmarc_record": None,
             "verification_tokens": [],
-            "other_records": []
+            "other_records": [],
         }
-        
-        for record in txt_records:
-            record_lower = record.lower()
-            if record_lower.startswith('v=spf1'):
-                analysis["spf_record"] = record
-            elif record_lower.startswith('v=dmarc1'):
-                analysis["dmarc_record"] = record
-            elif any(token in record_lower for token in ['google-site-verification', 'facebook-domain-verification']):
-                analysis["verification_tokens"].append(record)
+        for rec in txt_records:
+            rl = rec.lower()
+            if rl.startswith("v=spf1"):
+                analysis["spf_record"] = rec
+            elif rl.startswith("v=dmarc1"):
+                analysis["dmarc_record"] = rec
+            elif any(t in rl for t in ["google-site-verification", "facebook-domain-verification"]):
+                analysis["verification_tokens"].append(rec)
             else:
-                analysis["other_records"].append(record)
-        
+                analysis["other_records"].append(rec)
         return analysis
-    
-    def _check_subdomain_takeover_risk(self, dns_records: Dict[str, List[str]]) -> str:
-        """Check for subdomain takeover risks"""
-        # Simplified check for common vulnerable services
-        cnames = dns_records.get('CNAME', [])
+
+    def _check_subdomain_takeover_risk(self, dns_records: dict[str, list]) -> str:
         vulnerable_services = [
-            'github.io', 'herokuapp.com', 'amazonaws.com',
-            'azure', 'cloudfront.net', 'fastly.com'
+            "github.io", "herokuapp.com", "amazonaws.com",
+            "azure", "cloudfront.net", "fastly.com",
         ]
-        
-        for cname in cnames:
-            for service in vulnerable_services:
-                if service in cname.lower():
-                    return "Potential Risk"
-        
+        for cname in dns_records.get("CNAME", []):
+            if any(svc in cname.lower() for svc in vulnerable_services):
+                return "Potential Risk"
         return "Low Risk"
-    
-    async def _certificate_analysis(self, domain: str) -> Dict[str, Any]:
-        """SSL/TLS certificate analysis"""
-        logger.info(f"🔍 Analyzing certificates for {domain}")
-        
-        # Simulated certificate analysis
-        # In real implementation, would use SSL socket or openssl
-        cert_info = {
-            "has_certificate": False,
-            "issuer": "Unknown",
-            "subject": "Unknown",
-            "valid_from": "Unknown",
-            "valid_to": "Unknown",
-            "san_domains": [],
-            "certificate_transparency": False
-        }
-        
-        try:
-            # Simple HTTPS check
-            response = requests.get(f"https://{domain}", timeout=5, verify=False)
-            if response.status_code:
-                cert_info["has_certificate"] = True
-                cert_info["issuer"] = "Certificate Authority"
-                cert_info["certificate_transparency"] = True
-        except:
-            pass
-        
-        return cert_info
-    
-    def _calculate_attack_surface_score(self, target_intel: Dict[str, Any]) -> float:
-        """Calculate attack surface score based on reconnaissance findings"""
+
+    def _calculate_attack_surface_score(self, intel: dict[str, Any]) -> float:
         score = 0.0
-        
-        # Subdomain count contributes to score
-        score += len(target_intel.get("subdomains", [])) * 0.1
-        
-        # Open ports contribute to score
-        score += len(target_intel.get("open_ports", [])) * 0.2
-        
-        # Web endpoints contribute to score
-        web_apps = target_intel.get("web_applications", {})
-        score += len(web_apps.get("endpoints", [])) * 0.05
-        score += len(web_apps.get("forms", [])) * 0.3
-        
-        # Technologies contribute based on known vulnerabilities
-        technologies = target_intel.get("technologies", {})
-        for tech_category in technologies.values():
-            score += len(tech_category) * 0.1
-        
-        return min(10.0, score)  # Cap at 10.0
-    
-    def _generate_intelligence_summary(self, recon_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate comprehensive intelligence summary"""
-        total_subdomains = sum(len(data.get("subdomains", [])) for data in recon_data.values())
-        total_ports = sum(len(data.get("open_ports", [])) for data in recon_data.values())
-        total_endpoints = sum(len(data.get("web_applications", {}).get("endpoints", [])) for data in recon_data.values())
-        
-        # Find highest value targets
-        high_value_targets = []
-        for url, data in recon_data.items():
-            attack_surface = data.get("attack_surface_score", 0)
-            if attack_surface > 5.0:
-                high_value_targets.append({
-                    "target": url,
-                    "attack_surface_score": attack_surface,
-                    "subdomains": len(data.get("subdomains", [])),
-                    "open_ports": len(data.get("open_ports", []))
-                })
-        
+        score += len(intel.get("subdomains", [])) * 0.1
+        score += len(intel.get("open_ports", [])) * 0.2
+        web = intel.get("web_applications", {})
+        score += len(web.get("endpoints", [])) * 0.05
+        score += len(web.get("forms", [])) * 0.3
+        for tech_list in intel.get("technologies", {}).values():
+            score += len(tech_list) * 0.1
+        return round(min(10.0, score), 2)
+
+    def _generate_intelligence_summary(self, recon_data: dict[str, Any]) -> dict[str, Any]:
+        total_subdomains = sum(len(d.get("subdomains", [])) for d in recon_data.values())
+        total_ports = sum(len(d.get("open_ports", [])) for d in recon_data.values())
+        total_endpoints = sum(
+            len(d.get("web_applications", {}).get("endpoints", []))
+            for d in recon_data.values()
+        )
+        high_value = [
+            {
+                "target": url,
+                "attack_surface_score": d.get("attack_surface_score", 0),
+                "subdomains": len(d.get("subdomains", [])),
+                "open_ports": len(d.get("open_ports", [])),
+            }
+            for url, d in recon_data.items()
+            if d.get("attack_surface_score", 0) > 5.0
+        ]
         return {
             "targets_analyzed": len(recon_data),
             "total_subdomains_discovered": total_subdomains,
             "total_open_ports": total_ports,
             "total_endpoints": total_endpoints,
-            "high_value_targets": sorted(high_value_targets, key=lambda x: x["attack_surface_score"], reverse=True),
+            "high_value_targets": sorted(
+                high_value, key=lambda x: x["attack_surface_score"], reverse=True
+            ),
             "reconnaissance_completion": "comprehensive",
-            "intelligence_confidence": "high"
         }
