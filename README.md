@@ -1,12 +1,5 @@
 # Guardian AI
 
-[![Build Status](https://img.shields.io/github/actions/workflow/status/your-org/guardian-ai/ci.yml?branch=main)](https://github.com/your-org/guardian-ai/actions)
-[![Release](https://img.shields.io/github/v/release/your-org/guardian-ai)](https://github.com/your-org/guardian-ai/releases)
-[![Code Coverage](https://img.shields.io/codecov/c/github/your-org/guardian-ai)](https://codecov.io/gh/your-org/guardian-ai)
-[![Docker Pulls](https://img.shields.io/docker/pulls/your-org/guardian-ai)](https://hub.docker.com/r/your-org/guardian-ai)
-[![Stars](https://img.shields.io/github/stars/your-org/guardian-ai.svg?style=social)](https://github.com/your-org/guardian-ai/stargazers)
-[![Issues](https://img.shields.io/github/issues/your-org/guardian-ai)](https://github.com/your-org/guardian-ai/issues)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 
 > **Guardian AI** — Multi-agent, LLM-assisted penetration testing framework. Designed for automated reconnaissance → analysis → payload generation → exploitation → reporting.
