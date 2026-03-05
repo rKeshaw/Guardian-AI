@@ -226,10 +226,4 @@ If you find a security issue in this repository, please report it by opening a p
 
 ---
 
-## License
-
-This project is provided under the `MIT` license. See `LICENSE`.
-
----
-
-*Made with ❤ for security professionals. If you'd like a shorter README (one-page) or a dedicated `docs/` site scaffold, I can add that next.*
+*Made with ❤ for security professionals.
