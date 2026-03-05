@@ -1,42 +1,114 @@
-version: '3.8'
+# guardian/docker-compose.yml
+
+version: "3.9"
+
 services:
-  guardian_ai:
-    build: .
-    ports:
-      - "8888:8888"
-    environment:
-      - DATABASE_URL=sqlite:///./guardian.db
-      - REDIS_URL=redis://redis:6379
-      - OLLAMA_BASE_URL=http://ollama:11434
-    depends_on:
-      - redis
-      - ollama
-    volumes:
-      - ./:/app
-      - ./data:/app/data
-      - ./logs:/app/logsi
-      - /mnt/d/PayloadsAllTheThings:/PayloadsAllTheThings
-    restart: unless-stopped
 
+  # ── Ollama LLM server (managed mode only) ─────────────────────────────────
   ollama:
+    profiles: [managed]
     image: ollama/ollama:latest
+    container_name: guardian_ollama
     ports:
-      - "11434:11434"
+      - "${OLLAMA_HOST_PORT:-11434}:11434"
     volumes:
-      - ollama_data:/root/.ollama
+      - ollama_models:/root/.ollama
     environment:
-      - OLLAMA_ORIGINS=*
+      - OLLAMA_KEEP_ALIVE=24h
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
+  # ── One-shot model pull (managed mode only) ────────────────────────────────
+  ollama-init:
+    profiles: [managed]
+    image: ollama/ollama:latest
+    container_name: guardian_ollama_init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+        echo 'Pulling model ${OLLAMA_MODEL:-mistral:latest} ...' &&
+        OLLAMA_HOST=http://ollama:11434 ollama pull ${OLLAMA_MODEL:-mistral:latest} &&
+        echo 'Model pull complete.'
+      "
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    restart: "no"
+
+  # ── Redis (managed mode only) ──────────────────────────────────────────────
   redis:
+    profiles: [managed]
     image: redis:7-alpine
+    container_name: guardian_redis
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── Guardian AI application ────────────────────────────────────────────────
+  guardian_ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: guardian_ai
+    ports:
+      - "${GUARDIAN_PORT:-8888}:8888"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./PayloadsAllTheThings:/PayloadsAllTheThings:ro
+    environment:
+      # In managed mode these point to sibling containers.
+      # In external mode override in .env to point at your host services.
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-mistral:latest}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - DATABASE_URL=sqlite:////app/data/guardian.db
+      - PAYLOADS_REPO_PATH=/PayloadsAllTheThings
+      - VERIFY_SSL=${VERIFY_SSL:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - GUARDIAN_PORT=8888
+    depends_on:
+      ollama:
+        condition: service_healthy
+        required: false
+      ollama-init:
+        condition: service_completed_successfully
+        required: false
+      redis:
+        condition: service_healthy
+        required: false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8888/api/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # Allows containers to reach services running directly on the Docker host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 volumes:
-  ollama_data:
+  ollama_models:
   redis_data:
-
