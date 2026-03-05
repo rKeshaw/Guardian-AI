@@ -84,6 +84,8 @@ class ReportingAgent(BaseAgent):
 
             # Step 2 — Three decomposed LLM calls
             executive_summary = await self._generate_executive_summary(ctx)
+            if executive_summary is None:
+                executive_summary = self._fallback_executive_summary(ctx)
             technical_findings = await self._generate_technical_findings(ctx)
             remediation_plan = await self._generate_remediation_plan(ctx)
 
@@ -227,6 +229,48 @@ Return ONLY valid JSON matching this schema (no markdown):
             logger.warning("Executive summary generation failed: %s", error)
             return None
         return data
+
+    def _fallback_executive_summary(self, ctx: dict[str, Any]) -> dict[str, Any]:
+        """
+        Deterministic executive summary built directly from context data.
+        Used when the LLM call fails or returns unparseable output — ensures
+        executive_summary is never null in the final report.
+        """
+        vulns = ctx.get("identified_vulnerabilities", [])
+        confirmed = ctx.get("confirmed_vulnerabilities", [])
+        overall_risk = ctx.get("overall_risk", "Low")
+
+        critical_count = sum(1 for v in vulns if v.get("risk_level") == "Critical")
+        high_count = sum(1 for v in vulns if v.get("risk_level") == "High")
+
+        if not vulns:
+            business_impact = (
+                f"Assessment of {ctx.get('total_targets', 0)} target(s) completed. "
+                "No vulnerabilities were identified during this assessment. "
+                "The target presents a low attack surface based on reconnaissance data."
+            )
+            immediate_actions = ["No immediate actions required."]
+        else:
+            vuln_names = [v.get("name", "Unknown") for v in vulns[:3]]
+            business_impact = (
+                f"Assessment identified {len(vulns)} potential vulnerability/vulnerabilities "
+                f"across {ctx.get('total_targets', 0)} target(s), with "
+                f"{len(confirmed)} confirmed via active exploitation. "
+                f"Key findings include: {', '.join(vuln_names)}."
+            )
+            immediate_actions = [
+                f"Remediate {v.get('name')} ({v.get('owasp_category', '')})"
+                for v in vulns
+                if v.get("risk_level") in ("Critical", "High")
+            ][:5] or ["Review and remediate identified vulnerabilities."]
+
+        return {
+            "overall_risk_level": overall_risk,
+            "business_impact": business_impact,
+            "critical_findings_count": critical_count,
+            "high_findings_count": high_count,
+            "immediate_actions_required": immediate_actions,
+        }
 
     async def _generate_technical_findings(
         self, ctx: dict[str, Any]

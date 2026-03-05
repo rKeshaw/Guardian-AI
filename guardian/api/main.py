@@ -94,6 +94,7 @@ async def initialize_guardian_components() -> bool:
 
         from guardian.core.database import Database
         database = Database()
+        await database.initialize()
 
         from guardian.core.orchestrator import CentralOrchestrator
         orchestrator = CentralOrchestrator(database)

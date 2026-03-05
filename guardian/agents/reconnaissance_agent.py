@@ -604,15 +604,17 @@ class ReconnaissanceAgent(BaseAgent):
             "other_records": [],
         }
         for rec in txt_records:
-            rl = rec.lower()
+            # dnspython returns TXT values wrapped in quotes — strip them
+            clean = rec.strip().strip('"')
+            rl = clean.lower()
             if rl.startswith("v=spf1"):
-                analysis["spf_record"] = rec
+                analysis["spf_record"] = clean
             elif rl.startswith("v=dmarc1"):
-                analysis["dmarc_record"] = rec
+                analysis["dmarc_record"] = clean
             elif any(t in rl for t in ["google-site-verification", "facebook-domain-verification"]):
-                analysis["verification_tokens"].append(rec)
+                analysis["verification_tokens"].append(clean)
             else:
-                analysis["other_records"].append(rec)
+                analysis["other_records"].append(clean)
         return analysis
 
     def _check_subdomain_takeover_risk(self, dns_records: dict[str, list]) -> str:

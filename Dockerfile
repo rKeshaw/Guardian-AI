@@ -1,5 +1,6 @@
 # guardian/Dockerfile
 
+
 # ── Stage 1: Builder ──────────────────────────────────────────────────────────
 FROM python:3.11-slim AS builder
 
@@ -32,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nmap \
     curl \
     dnsutils \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy venv from builder — no compiler toolchain in runtime image
@@ -39,22 +41,25 @@ COPY --from=builder /venv /venv
 ENV PATH="/venv/bin:$PATH"
 
 # Copy application code
+# guardian/data/ (wordlists etc.) is part of the package — no separate COPY needed.
+# /app/data/ is the runtime database directory, created below and bind-mounted
+# at runtime via docker-compose volumes so it is never baked into the image.
 COPY guardian/ ./guardian/
-COPY data/      ./data/
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-# Prepare log and data directories with correct permissions
-RUN mkdir -p /app/logs /app/data && \
-    chmod 755 /app/logs /app/data
+# Prepare runtime directories (logs + database) with correct permissions
+RUN mkdir -p /app/logs /app/data
 
-# Non-root user for security
+# Non-root user — entrypoint.sh fixes bind-mount ownership then drops to this user
 RUN useradd -r -s /bin/false -u 1000 guardian && \
     chown -R guardian:guardian /app
-USER guardian
 
 EXPOSE 8888
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
     CMD curl -sf http://localhost:8888/api/v1/health || exit 1
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "-m", "uvicorn", "guardian.api.main:app", \
      "--host", "0.0.0.0", "--port", "8888", "--workers", "1"]

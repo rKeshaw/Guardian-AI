@@ -119,10 +119,10 @@ class Settings(BaseSettings):
                 f"PAYLOADS_REPO_PATH does not exist: {self.PAYLOADS_REPO_PATH}. "
                 "Payload generation will fall back to non-RAG mode."
             )
-        elif not (payloads_path / "Methodology and Resources").exists():
+        elif not any(payloads_path.rglob("*.md")):
             warnings.append(
-                f"PayloadsAllTheThings directory structure not recognised at "
-                f"{self.PAYLOADS_REPO_PATH}. Expected 'Methodology and Resources' subdirectory."
+                f"PAYLOADS_REPO_PATH exists but contains no .md files: {self.PAYLOADS_REPO_PATH}. "
+                "Knowledge index will be empty — check the volume mount."
             )
 
         if self.CA_BUNDLE_PATH and not Path(self.CA_BUNDLE_PATH).exists():

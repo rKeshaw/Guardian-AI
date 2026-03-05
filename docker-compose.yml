@@ -1,4 +1,20 @@
 # guardian/docker-compose.yml
+#
+# ──────────────────────────────────────────
+# Supports two deployment modes via Docker Compose profiles:
+#
+#   MANAGED MODE (default — starts ollama + redis alongside the app):
+#     docker compose --profile managed up
+#
+#   EXTERNAL MODE (connect to ollama/redis already running on host):
+#     docker compose up
+#     Then set in .env:
+#       OLLAMA_BASE_URL=http://host.docker.internal:11434
+#       REDIS_URL=redis://host.docker.internal:6379
+#
+# Host ports are configurable to avoid collisions even in managed mode:
+#   OLLAMA_HOST_PORT=11435   (if 11434 is already bound)
+#   REDIS_HOST_PORT=6380     (if 6379 is already bound)
 
 version: "3.9"
 
@@ -76,7 +92,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./PayloadsAllTheThings:/PayloadsAllTheThings:ro
+      - ../PayloadsAllTheThings:/PayloadsAllTheThings:ro
     environment:
       # In managed mode these point to sibling containers.
       # In external mode override in .env to point at your host services.
