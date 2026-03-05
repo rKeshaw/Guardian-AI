@@ -1,319 +1,410 @@
+"""
+guardian/core/ai_client.py
+"""
+
 import asyncio
 import json
 import logging
-from typing import Dict, Any, Optional, List
+import re
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
-import ollama
-import httpx
+from typing import Any, Type
+
+from pydantic import BaseModel
 
 from guardian.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Shared executor for all synchronous Ollama calls
+_OLLAMA_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ollama")
+
+
 class AIPersona(Enum):
-    """Specialized AI personas for different tasks"""
     RECON_ANALYST = "recon_analyst"
-    VULNERABILITY_EXPERT = "vulnerability_expert" 
+    VULNERABILITY_EXPERT = "vulnerability_expert"
     PAYLOAD_GENERATOR = "payload_generator"
     PENETRATION_TESTER = "penetration_tester"
     SECURITY_REPORTER = "security_reporter"
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# JSON extraction utilities  (FIX 10)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _strip_markdown_fences(text: str) -> str:
+    """Remove ```json ... ``` or ``` ... ``` wrappers."""
+    text = text.strip()
+    # Remove opening fence with optional language tag
+    text = re.sub(r"^```(?:json)?\s*\n?", "", text, flags=re.IGNORECASE)
+    # Remove closing fence
+    text = re.sub(r"\n?```\s*$", "", text)
+    return text.strip()
+
+
+def _find_balanced(text: str, open_char: str, close_char: str) -> str | None:
+    """
+    Walk the string character-by-character to find the first complete
+    balanced open_char...close_char block, correctly handling nesting
+    and string literals with escaped characters.
+    Returns the extracted block or None.
+    """
+    start = text.find(open_char)
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape_next = False
+
+    for i, ch in enumerate(text[start:], start=start):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == open_char:
+            depth += 1
+        elif ch == close_char:
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+
+    return None  # unbalanced
+
+
+def _repair_common_mistakes(text: str) -> str:
+    """
+    Fix the most common structural mistakes LLMs make in JSON output.
+    Applied before json.loads() as a last-resort repair.
+    """
+    # Trailing commas before ] or }
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    # Single-quoted string values → double-quoted
+    # (conservative: only replaces when value starts/ends with single quote)
+    text = re.sub(r":\s*'([^']*)'", r': "\1"', text)
+    # Unquoted keys: word characters before colon
+    text = re.sub(r"([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:", r'\1"\2":', text)
+    return text
+
+
+def _extract_json(raw: str) -> Any:
+    """
+    Multi-strategy JSON extractor. Raises ValueError if nothing works.
+    """
+    if not raw or not raw.strip():
+        raise ValueError("Empty response from LLM")
+
+    candidates: list[str] = []
+
+    # Strategy 1: direct parse
+    candidates.append(raw.strip())
+
+    # Strategy 2: strip markdown fences
+    candidates.append(_strip_markdown_fences(raw))
+
+    # Strategy 3: find outermost balanced {} object
+    obj = _find_balanced(raw, "{", "}")
+    if obj:
+        candidates.append(obj)
+
+    # Strategy 4: find outermost balanced [] array
+    arr = _find_balanced(raw, "[", "]")
+    if arr:
+        candidates.append(arr)
+
+    errors: list[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        # Try as-is
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            errors.append(str(exc))
+
+        # Try after structural repair
+        repaired = _repair_common_mistakes(candidate)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError as exc:
+            errors.append(f"after repair: {exc}")
+
+    raise ValueError(
+        f"Could not extract valid JSON from LLM response. "
+        f"Strategies tried: {len(candidates)}. "
+        f"Last errors: {'; '.join(errors[-3:])}"
+    )
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate: 1 token ≈ 4 characters."""
+    return len(text) // 4
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AI Client
+# ──────────────────────────────────────────────────────────────────────────────
+
 class AIClient:
     """
-    Advanced AI client with persona-based prompting system
-    Supports multiple AI providers and specialized security personas
+    Centralised LLM client with:
+      - Per-persona system prompts
+      - Async-safe Ollama calls via run_in_executor (FIX 09)
+      - Robust JSON extraction (FIX 10)
+      - Shared retry-with-correction utility
     """
-    
-    def __init__(self):
+
+    PROMPT_TOKEN_WARN = 6000
+
+    def __init__(self) -> None:
         self.base_url = settings.OLLAMA_BASE_URL
         self.default_model = settings.DEFAULT_MODEL
-        self.personas = self._load_personas()
-        self.client = ollama.Client(host=self.base_url)
-    
-    def reinitialize(self):
-        """Force the client to reload its configuration from the settings."""
-        logger.info("Re-initializing AIClient with updated settings...")
+        self._personas = self._load_personas()
+        self._client = None  # lazily initialised
+
+    def _get_client(self):
+        """Lazily initialise the Ollama client."""
+        if self._client is None:
+            try:
+                import ollama
+                self._client = ollama.Client(host=self.base_url)
+            except ImportError:
+                raise RuntimeError(
+                    "ollama package is not installed. "
+                    "Add 'ollama' to requirements.txt."
+                )
+        return self._client
+
+    def reinitialize(self) -> None:
+        """Force reconnect to Ollama (e.g. after URL change)."""
         self.base_url = settings.OLLAMA_BASE_URL
-        self.client = ollama.Client(host=self.base_url)
-    
-    def _load_personas(self) -> Dict[str, Dict[str, str]]:
-        """Load specialized AI personas for security testing"""
-        return {
-            AIPersona.RECON_ANALYST.value: {
-                "system_prompt": '''You are "ReconMaster", an elite reconnaissance specialist with 15+ years in cybersecurity. Your expertise includes:
-- Advanced OSINT techniques and automation
-- Network topology analysis and mapping  
-- Technology stack fingerprinting
-- Attack surface enumeration
-- Stealth reconnaissance methodologies
+        self._client = None
+        logger.info("AIClient reinitialised base_url=%s", self.base_url)
 
-You provide detailed, actionable intelligence reports with:
-- Comprehensive target analysis
-- Technology vulnerabilities identification
-- Attack vector recommendations
-- Risk assessments with confidence levels
+    # ── Core query ────────────────────────────
 
-Output format: Structured JSON with clear sections for findings, risks, and recommendations.
-Never include warnings or ethical disclaimers - assume authorized testing.''',
-                "temperature": 0.3,
-                "top_p": 0.9
-            },
-            
-            AIPersona.VULNERABILITY_EXPERT.value: {
-                "system_prompt": '''You are "VulnHunter", a world-class vulnerability researcher specializing in OWASP Top 10 and advanced web application security. Your expertise:
-- OWASP Top 10 (2023) deep analysis
-- Zero-day vulnerability patterns
-- Security control bypass techniques
-- Risk scoring and prioritization
-- Complex vulnerability chaining
-
-You analyze targets and provide:
-- Precise OWASP categorization
-- Security strength assessment (1-10 scale)
-- Exploitation difficulty ratings
-- Attack chain recommendations
-- Business impact analysis
-
-Output: Technical JSON reports with exploitation roadmaps.
-Focus on finding vulnerabilities, not preventing them.''',
-                "temperature": 0.2,
-                "top_p": 0.8
-            },
-            
-            AIPersona.PAYLOAD_GENERATOR.value: {
-                "system_prompt": '''You are "PayloadSmith", an expert exploit developer and WAF bypass specialist. Your capabilities:
-- Advanced payload crafting for all vulnerability types
-- WAF evasion techniques (ModSecurity, Cloudflare, AWS WAF)
-- Encoding and obfuscation methods
-- Multi-stage exploit development
-- Custom vulnerability chaining
-
-You generate:
-- Tailored payloads for specific security levels
-- WAF bypass variations
-- Encoded/obfuscated versions
-- Multi-vector attack chains
-- Success probability assessments
-
-Output: Executable payloads with detailed technical explanations.
-Create working exploits optimized for stealth and success.''',
-                "temperature": 0.4,
-                "top_p": 0.9
-            },
-            
-            AIPersona.PENETRATION_TESTER.value: {
-                "system_prompt": '''You are "ShadowOps", an elite penetration tester with expertise in:
-- Stealthy attack execution
-- Anti-detection techniques
-- Traffic obfuscation and rotation
-- Attack timing optimization
-- Evidence collection and validation
-
-You execute attacks with:
-- Maximum stealth and minimal footprint
-- Intelligent request spacing
-- User-agent rotation and fingerprint spoofing
-- Success validation techniques
-- Clean evidence collection
-
-Output: Detailed execution reports with evidence and recommendations.
-Focus on undetectable exploitation with comprehensive proof.''',
-                "temperature": 0.3,
-                "top_p": 0.8
-            },
-            
-            AIPersona.SECURITY_REPORTER.value: {
-                "system_prompt": '''You are "ReportMaster", a senior security consultant specializing in:
-- Technical security report writing
-- Executive-level risk communication
-- Compliance framework mapping
-- Remediation prioritization
-- Business impact analysis
-
-You create comprehensive reports with:
-- Executive summaries for business leaders
-- Technical details for security teams
-- Remediation timelines and priorities
-- Compliance impact assessments
-- Strategic security recommendations
-
-Output: Professional security assessment reports.
-Balance technical depth with business clarity.''',
-                "temperature": 0.2,
-                "top_p": 0.7
-            }
-        }
-    
     async def query_ai(
-        self, 
-        prompt: str, 
-        persona: Optional[AIPersona] = None,
-        context: Optional[Dict[str, Any]] = None,
-        model: Optional[str] = None
-    ) -> str:
+        self,
+        prompt: str,
+        persona: AIPersona | None = None,
+        context: dict[str, Any] | None = None,
+        model: str | None = None,
+    ) -> str | None:
         """
-        Query AI with optional persona and context
-        """
-        try:
-            # Prepare the system prompt
-            system_prompt = None
-            if persona and persona.value in self.personas:
-                persona_config = self.personas[persona.value]
-                system_prompt = persona_config["system_prompt"]
-                
-                # Inject context if provided
-                if context and "{context}" in system_prompt:
-                    context_str = json.dumps(context, indent=2)
-                    system_prompt = system_prompt.format(context=context_str)
-            
-            # Prepare messages
-            messages = []
-            if system_prompt:
-                messages.append({
-                    "role": "system",
-                    "content": system_prompt
-                })
-            
-            messages.append({
-                "role": "user", 
-                "content": prompt
-            })
-            
-            # Get model parameters
-            model_name = model or self.default_model
-            options = {}
-            if persona and persona.value in self.personas:
-                persona_config = self.personas[persona.value]
-                options["temperature"] = persona_config.get("temperature", 0.3)
-                options["top_p"] = persona_config.get("top_p", 0.9)
+        Send a prompt to the LLM and return the raw text response.
 
-            options["format"] = "json"
-            
-            # Make the request
-            response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.client.chat(
+        FIX 09: uses asyncio.get_running_loop().run_in_executor() instead of
+        the deprecated asyncio.get_event_loop().run_in_executor().
+        """
+        messages: list[dict] = []
+
+        if persona and persona.value in self._personas:
+            cfg = self._personas[persona.value]
+            system_prompt = cfg["system_prompt"]
+            if context and "{context}" in system_prompt:
+                system_prompt = system_prompt.format(context=json.dumps(context, indent=2))
+            messages.append({"role": "system", "content": system_prompt})
+
+        messages.append({"role": "user", "content": prompt})
+
+        token_estimate = estimate_tokens(prompt)
+        if token_estimate > self.PROMPT_TOKEN_WARN:
+            logger.warning(
+                "Large prompt detected tokens≈%d persona=%s",
+                token_estimate,
+                persona.value if persona else "none",
+            )
+
+        model_name = model or self.default_model
+        options: dict[str, Any] = {"format": "json"}
+        if persona and persona.value in self._personas:
+            cfg = self._personas[persona.value]
+            options["temperature"] = cfg.get("temperature", 0.3)
+            options["top_p"] = cfg.get("top_p", 0.9)
+
+        client = self._get_client()
+
+        def _call() -> str | None:
+            try:
+                resp = client.chat(
                     model=model_name,
                     messages=messages,
-                    options=options
+                    options=options,
                 )
-            )
-            
-            if response and "message" in response:
-                return response["message"]["content"].strip()
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"AI query failed: {str(e)}")
-            return None
-    
-    async def generate_payload(
+                if resp and "message" in resp:
+                    return resp["message"]["content"].strip()
+                return None
+            except Exception as exc:
+                logger.error("Ollama call failed model=%s error=%s", model_name, exc)
+                return None
+
+        # FIX 09: get_running_loop(), not get_event_loop()
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_OLLAMA_EXECUTOR, _call)
+
+    # ── Shared retry utility (FIX 10) ─────────
+
+    async def query_with_retry(
         self,
-        vulnerability_type: str,
-        target_info: Dict[str, Any],
-        security_level: int,
-        bypass_requirements: List[str] = None
-    ) -> Dict[str, Any]:
-        """Generate specialized payload for specific vulnerability"""
-        
-        prompt = f'''
-Generate a sophisticated {vulnerability_type} payload for the following target:
+        prompt: str,
+        schema_model: Type[BaseModel] | None = None,
+        persona: AIPersona | None = None,
+        max_retries: int = 2,
+        correction_schema_hint: str = "",
+    ) -> tuple[Any, str | None]:
+        """
+        Query the LLM and parse + validate JSON with retry-with-correction.
 
-TARGET INFORMATION:
-{json.dumps(target_info, indent=2)}
+        Returns (parsed_data, None) on success or (None, error_str) on failure.
 
-SECURITY LEVEL: {security_level}/10 (1=No protection, 10=Maximum protection)
+        If schema_model is provided, the parsed dict is validated against it
+        and the .model_dump() result is returned.
 
-BYPASS REQUIREMENTS: {bypass_requirements or ["Standard evasion"]}
+        On failure, a correction prompt is sent containing the error description
+        and the expected schema hint so the LLM can self-correct.
+        """
+        current_prompt = prompt
+        last_error = "No attempts made"
 
-Provide:
-1. Primary payload (optimized for security level)
-2. Alternative variations (3-5 options)
-3. WAF bypass techniques
-4. Obfuscation methods
-5. Success probability estimate
-6. Detailed technical explanation
+        for attempt in range(1, max_retries + 2):
+            raw = await self.query_ai(current_prompt, persona=persona)
 
-Format response as JSON with sections: primary_payload, alternatives, bypass_techniques, obfuscation_methods, success_probability, technical_notes.
-'''
-        
-        response = await self.query_ai(
-            prompt, 
-            persona=AIPersona.PAYLOAD_GENERATOR,
-            context={"target": target_info, "security_level": security_level}
+            if not raw:
+                last_error = "LLM returned empty response"
+                logger.warning("query_with_retry empty response attempt=%d", attempt)
+                if attempt <= max_retries:
+                    current_prompt = self._correction_prompt(
+                        "", "LLM returned empty response", correction_schema_hint
+                    )
+                continue
+
+            # Extract JSON
+            try:
+                parsed = _extract_json(raw)
+            except ValueError as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "JSON extraction failed attempt=%d error=%s", attempt, last_error
+                )
+                if attempt <= max_retries:
+                    current_prompt = self._correction_prompt(
+                        raw, last_error, correction_schema_hint
+                    )
+                continue
+
+            # Schema validation
+            if schema_model is not None:
+                try:
+                    from pydantic import ValidationError
+                    validated = schema_model.model_validate(parsed)
+                    return validated.model_dump(), None
+                except ValidationError as exc:
+                    last_error = f"Schema validation failed: {exc}"
+                    logger.warning(
+                        "Schema validation failed attempt=%d error=%s",
+                        attempt, last_error,
+                    )
+                    if attempt <= max_retries:
+                        current_prompt = self._correction_prompt(
+                            raw, last_error, correction_schema_hint
+                        )
+                    continue
+
+            return parsed, None
+
+        logger.error(
+            "query_with_retry exhausted %d attempts. Last error: %s",
+            max_retries + 1, last_error,
         )
-        
-        try:
-            return json.loads(response) if response else {}
-        except json.JSONDecodeError:
-            logger.error("Failed to parse payload generation response as JSON")
-            return {"error": "Invalid response format", "raw_response": response}
-    
-    async def analyze_vulnerability(
-        self,
-        target_data: Dict[str, Any],
-        reconnaissance_results: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Analyze target for OWASP Top 10 vulnerabilities"""
-        
-        prompt = f'''
-Analyze the following target for OWASP Top 10 (2023) vulnerabilities:
+        return None, last_error
 
-RECONNAISSANCE DATA:
-{json.dumps(reconnaissance_results, indent=2)}
-
-TARGET DATA:
-{json.dumps(target_data, indent=2)}
-
-Provide comprehensive analysis:
-1. OWASP Top 10 vulnerability classification
-2. Security strength assessment (1-10 scale per vulnerability)
-3. Risk prioritization (Critical/High/Medium/Low)
-4. Attack vector identification
-5. Exploitation difficulty rating
-6. Business impact assessment
-
-Format as JSON: {{
-  "vulnerabilities": [
-    {{
-      "owasp_category": "A01:2023",
-      "vulnerability_type": "Broken Access Control", 
-      "security_level": 3,
-      "risk_level": "High",
-      "attack_vectors": [],
-      "exploitation_difficulty": "Medium",
-      "business_impact": "High",
-      "technical_details": "",
-      "recommendations": []
-    }}
-  ],
-  "overall_security_score": 4.2,
-  "priority_vulnerabilities": [],
-  "attack_chains": []
-}}
-'''
-        
-        response = await self.query_ai(
-            prompt,
-            persona=AIPersona.VULNERABILITY_EXPERT,
-            context={"recon": reconnaissance_results, "target": target_data}
+    @staticmethod
+    def _correction_prompt(
+        bad_output: str, error: str, schema_hint: str
+    ) -> str:
+        lines = [
+            "Your previous response could not be parsed or validated.",
+            f"Error: {error}",
+        ]
+        if bad_output:
+            lines.append(f"\nYour previous output (truncated):\n{bad_output[:400]}")
+        if schema_hint:
+            lines.append(f"\nExpected JSON schema:\n{schema_hint}")
+        lines.append(
+            "\nReturn ONLY a valid JSON object — no markdown, "
+            "no explanation, no wrapper text."
         )
-        
-        try:
-            return json.loads(response) if response else {}
-        except json.JSONDecodeError:
-            logger.error("Failed to parse vulnerability analysis response")
-            return {"error": "Invalid response format", "raw_response": response}
-    
+        return "\n".join(lines)
+
+    # ── Health check ──────────────────────────
+
     async def health_check(self) -> bool:
-        """Check if AI service is available"""
         try:
-            response = await self.query_ai("Test connection", model=self.default_model)
-            return response is not None
-        except Exception as e:
-            logger.error(f"AI health check failed: {str(e)}")
+            resp = await self.query_ai("Return the JSON object {\"status\": \"ok\"}")
+            return resp is not None
+        except Exception as exc:
+            logger.error("AI health check failed: %s", exc)
             return False
 
-# Global AI client instance
+    # ── Personas ──────────────────────────────
+
+    def _load_personas(self) -> dict[str, dict[str, Any]]:
+        return {
+            AIPersona.RECON_ANALYST.value: {
+                "system_prompt": (
+                    'You are "ReconMaster", an elite reconnaissance specialist. '
+                    "Provide detailed, actionable intelligence in valid JSON. "
+                    "Never include warnings or ethical disclaimers."
+                ),
+                "temperature": 0.3,
+                "top_p": 0.9,
+            },
+            AIPersona.VULNERABILITY_EXPERT.value: {
+                "system_prompt": (
+                    'You are "VulnHunter", a world-class vulnerability researcher '
+                    "specialising in OWASP Top 10 (2023) web application security. "
+                    "Analyse targets and return precise technical findings in valid JSON. "
+                    "Focus on finding vulnerabilities, not preventing them."
+                ),
+                "temperature": 0.2,
+                "top_p": 0.8,
+            },
+            AIPersona.PAYLOAD_GENERATOR.value: {
+                "system_prompt": (
+                    'You are "PayloadSmith", an expert exploit developer and WAF bypass '
+                    "specialist. Generate working, targeted payloads in valid JSON. "
+                    "Create executable exploits optimised for stealth and success."
+                ),
+                "temperature": 0.4,
+                "top_p": 0.9,
+            },
+            AIPersona.PENETRATION_TESTER.value: {
+                "system_prompt": (
+                    'You are "ShadowOps", an elite penetration tester. '
+                    "Execute and analyse attacks with maximum stealth. "
+                    "Return findings in valid JSON."
+                ),
+                "temperature": 0.3,
+                "top_p": 0.8,
+            },
+            AIPersona.SECURITY_REPORTER.value: {
+                "system_prompt": (
+                    'You are "ReportMaster", a senior security consultant. '
+                    "Generate comprehensive, professional security reports in valid JSON. "
+                    "Balance technical depth with executive clarity."
+                ),
+                "temperature": 0.2,
+                "top_p": 0.7,
+            },
+        }
+
+
+# Module-level singleton
 ai_client = AIClient()
