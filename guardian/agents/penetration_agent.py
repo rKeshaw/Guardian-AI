@@ -3,15 +3,16 @@ guardian/agents/penetration_agent.py
 """
 
 import asyncio
-import json
 import logging
 import random
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlencode, parse_qs
 
 import aiohttp
+from pydantic import BaseModel, Field
 
 from guardian.agents.base_agent import BaseAgent
 from guardian.core.ai_client import ai_client, AIPersona

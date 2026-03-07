@@ -8,11 +8,15 @@ import os
 import traceback
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, AnyHttpUrl, Field
 from typing import Any, Dict, List, Optional
+
+from guardian.api.graph_viz import build_graph_response
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,10 +25,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info("Guardian AI starting up …")
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    logger.info("Guardian AI initialising …")
+    await initialize_guardian_components()
+    yield
+
 app = FastAPI(
     title="Guardian AI — Multi-Agent Penetration Testing System",
     description="Advanced AI-powered penetration testing with 5 specialised agents covering OWASP Top 10 (2023)",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -44,7 +55,7 @@ env_warnings: list[str] = []
 
 # ── Pydantic models ────────────────────────────
 class ScanRequest(BaseModel):
-    target_urls: List[str]
+    target_urls: List[AnyHttpUrl] = Field(min_length=1)
     config: Optional[Dict[str, Any]] = {}
 
 
@@ -137,12 +148,10 @@ async def dashboard():
 async def start_scan(scan_request: ScanRequest):
     if not orchestrator:
         raise HTTPException(503, detail=f"Orchestrator unavailable. {startup_error or ''}")
-    if not scan_request.target_urls:
-        raise HTTPException(400, detail="target_urls must not be empty.")
 
     try:
         session_id = await orchestrator.start_scan(
-            scan_request.target_urls,
+            [str(url) for url in scan_request.target_urls],
             scan_request.config or {},
         )
     except RuntimeError as exc:
@@ -190,6 +199,20 @@ async def get_scan_status(session_id: str):
         "results": status_data.get("results_preview", {}),
     })
 
+@app.get("/api/v1/scan/{session_id}/graph")
+async def get_scan_graph(session_id: str):
+    if not orchestrator:
+        raise HTTPException(503, detail="Orchestrator unavailable.")
+
+    try:
+        if hasattr(orchestrator, "get_session_graph"):
+            graph = await orchestrator.get_session_graph(session_id)
+        else:
+            graph = orchestrator._get_context(session_id).graph
+    except KeyError:
+        raise HTTPException(404, detail=f"Session '{session_id}' not found.")
+
+    return JSONResponse(content=build_graph_response(graph))
 
 @app.get("/api/v1/scan/{session_id}/results")
 async def get_scan_results(session_id: str):
@@ -230,13 +253,6 @@ async def health_check():
         "environment_warnings": env_warnings,
         "startup_error": startup_error,
     }
-
-
-# ── Lifecycle ──────────────────────────────────
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Guardian AI initialising …")
-    await initialize_guardian_components()
 
 
 if __name__ == "__main__":

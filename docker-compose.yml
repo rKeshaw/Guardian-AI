@@ -1,22 +1,19 @@
 # guardian/docker-compose.yml
 #
-# ──────────────────────────────────────────
-# Supports two deployment modes via Docker Compose profiles:
+# Two deployment modes:
 #
-#   MANAGED MODE (default — starts ollama + redis alongside the app):
+#   MANAGED (starts ollama alongside the app):
 #     docker compose --profile managed up
 #
-#   EXTERNAL MODE (connect to ollama/redis already running on host):
+#   EXTERNAL (ollama already running on host):
 #     docker compose up
-#     Then set in .env:
+#     Set in .env:
 #       OLLAMA_BASE_URL=http://host.docker.internal:11434
-#       REDIS_URL=redis://host.docker.internal:6379
 #
-# Host ports are configurable to avoid collisions even in managed mode:
-#   OLLAMA_HOST_PORT=11435   (if 11434 is already bound)
-#   REDIS_HOST_PORT=6380     (if 6379 is already bound)
-
-version: "3.9"
+# Model selection:
+#   OLLAMA_MODEL=mixtral:latest          (recommended, requires ~26GB VRAM)
+#   OLLAMA_MODEL=mistral:latest          (fallback, 8GB VRAM)
+#   OLLAMA_MODEL_FAST=mistral:latest     (used for low-reasoning tasks)
 
 services:
 
@@ -37,7 +34,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 20s
+      start_period: 30s
     deploy:
       resources:
         reservations:
@@ -56,31 +53,19 @@ services:
         condition: service_healthy
     entrypoint: >
       sh -c "
-        echo 'Pulling model ${OLLAMA_MODEL:-mistral:latest} ...' &&
-        OLLAMA_HOST=http://ollama:11434 ollama pull ${OLLAMA_MODEL:-mistral:latest} &&
+        MODEL=${OLLAMA_MODEL:-mixtral:latest} &&
+        echo 'Pulling primary model: '$MODEL &&
+        OLLAMA_HOST=http://ollama:11434 ollama pull $MODEL &&
+        FAST_MODEL=${OLLAMA_MODEL_FAST:-ollama3:latest} &&
+        echo 'Pulling fast model: '$FAST_MODEL &&
+        OLLAMA_HOST=http://ollama:11434 ollama pull $FAST_MODEL &&
         echo 'Model pull complete.'
       "
     environment:
       - OLLAMA_HOST=http://ollama:11434
     restart: "no"
 
-  # ── Redis (managed mode only) ──────────────────────────────────────────────
-  redis:
-    profiles: [managed]
-    image: redis:7-alpine
-    container_name: guardian_redis
-    ports:
-      - "${REDIS_HOST_PORT:-6379}:6379"
-    volumes:
-      - redis_data:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
-  # ── Guardian AI application ────────────────────────────────────────────────
+  # ── Guardian AI ────────────────────────────────────────────────────────────
   guardian_ai:
     build:
       context: .
@@ -94,16 +79,16 @@ services:
       - ./logs:/app/logs
       - ../PayloadsAllTheThings:/PayloadsAllTheThings:ro
     environment:
-      # In managed mode these point to sibling containers.
-      # In external mode override in .env to point at your host services.
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-mistral:latest}
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-mixtral:latest}
+      - OLLAMA_MODEL_FAST=${OLLAMA_MODEL_FAST:-ollama3:latest}
       - DATABASE_URL=sqlite:////app/data/guardian.db
       - PAYLOADS_REPO_PATH=/PayloadsAllTheThings
       - VERIFY_SSL=${VERIFY_SSL:-true}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - GUARDIAN_PORT=8888
+      - MAX_GRAPH_TOKENS=${MAX_GRAPH_TOKENS:-50000}
+      - MAX_CONCURRENT_SCANS=${MAX_CONCURRENT_SCANS:-3}
     depends_on:
       ollama:
         condition: service_healthy
@@ -111,20 +96,15 @@ services:
       ollama-init:
         condition: service_completed_successfully
         required: false
-      redis:
-        condition: service_healthy
-        required: false
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8888/api/v1/health"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 30s
-    # Allows containers to reach services running directly on the Docker host
+      start_period: 40s
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
 volumes:
   ollama_models:
-  redis_data:

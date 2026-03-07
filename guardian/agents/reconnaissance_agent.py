@@ -1,667 +1,550 @@
-"""
-guardian/agents/reconnaissance_agent.py
-"""
+from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import os
-import random
-import socket
+import re
 import ssl
-import time
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import aiohttp
-import dns.resolver
-import nmap
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 
-from guardian.agents.base_agent import BaseAgent
+from guardian.core.ai_client import estimate_tokens
 from guardian.core.config import settings
+from guardian.models.target_model import TargetModel
 
 logger = logging.getLogger(__name__)
 
-# One shared thread-pool for all nmap / legacy-blocking calls
-_BLOCKING_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="recon-blocking")
+_NMAP_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="nmap")
 
-# Maximum parallel DNS resolutions
-MAX_DNS_CONCURRENCY = 50
+_TECH_INDICATORS: dict[str, list[str]] = {
+    "wordpress": ["wp-content", "wp-includes"],
+    "django": ["csrfmiddlewaretoken", "__admin__"],
+    "rails": ["csrf-token", "data-remote"],
+    "laravel": ["laravel_session", "XSRF-TOKEN"],
+    "php": [".php", "<?php"],
+    "react": ["__reactFiber", "_react"],
+    "angular": ["ng-version", "angular"],
+    "vue": ["__vue__", "v-bind"],
+}
 
-# Maximum parallel HTTP requests during crawl / subdomain service checks
-MAX_HTTP_CONCURRENCY = 20
-
-
-def _build_ssl_context() -> ssl.SSLContext | bool:
-    """
-    Return an ssl.SSLContext if VERIFY_SSL is True (optionally loading a
-    custom CA bundle), or False to disable verification entirely.
-    Setting VERIFY_SSL=False emits a startup warning.
-    """
-    if not settings.VERIFY_SSL:
-        logger.warning(
-            "SSL verification is DISABLED (VERIFY_SSL=False). "
-            "This exposes reconnaissance traffic to MITM attacks."
-        )
-        return False
-
-    ctx = ssl.create_default_context()
-    if settings.CA_BUNDLE_PATH and os.path.exists(settings.CA_BUNDLE_PATH):
-        ctx.load_verify_locations(cafile=settings.CA_BUNDLE_PATH)
-        logger.debug("Loaded custom CA bundle from %s", settings.CA_BUNDLE_PATH)
-    return ctx
+_WAF_SIGNATURES: list[tuple[str, str, str]] = [
+    ("x-sucuri-id", "", "sucuri"),
+    ("x-firewall", "", "generic_firewall"),
+    ("server", "cloudflare", "cloudflare"),
+    ("x-cdn", "", "cdn_waf"),
+    ("cf-ray", "", "cloudflare"),
+]
 
 
-# Build once at import time — all aiohttp sessions in this module reuse it
-_SSL_CONTEXT = _build_ssl_context()
+@dataclass
+class _CrawlPage:
+    url: str
+    body: str
+    title: str
+    forms: list[dict]
+    links: list[str]
+    script_urls: list[str]
+    html_comments: list[str]
+    classification: str
 
 
-def _make_connector() -> aiohttp.TCPConnector:
-    return aiohttp.TCPConnector(
-        ssl=_SSL_CONTEXT,
-        limit=MAX_HTTP_CONCURRENCY,
-        limit_per_host=5,
-        enable_cleanup_closed=True,
-    )
-
-
-class ReconnaissanceAgent(BaseAgent):
-    """
-    Agent 1 — Elite Reconnaissance and Intelligence Gathering.
-
-    Capabilities:
-      - Subdomain enumeration (wordlist + CT logs, with wildcard guard)
-      - Technology stack fingerprinting
-      - Non-blocking Nmap port scanning
-      - Async web application crawling
-      - DNS intelligence gathering
-      - SSL/TLS certificate analysis
-      - Attack surface scoring
-    """
-
+class ReconnaissanceAgent:
     def __init__(self, db) -> None:
-        super().__init__(db, "ReconnaissanceAgent")
-        self._user_agents: list[str] = settings.USER_AGENTS
+        self.db = db
 
-    # ── Entry point ───────────────────────────
+    async def run(self, target_urls: list[str], config: dict) -> TargetModel:
+        if not target_urls:
+            raise ValueError("target_urls cannot be empty")
 
-    async def execute(self, task_data: dict[str, Any]) -> dict[str, Any]:
-        task_id = await self._start_task(task_data)
-        session_id = task_data.get("session_id", "unknown")
-
-        try:
-            targets: list[str] = task_data.get("targets", [])
-            config: dict[str, Any] = task_data.get("config", {})
-            logger.info("Reconnaissance starting targets=%s", targets)
-
-            results: dict[str, Any] = {
-                "task_id": task_id,
-                "agent_name": "ReconMaster",
-                "targets_analyzed": len(targets),
-                "reconnaissance_data": {},
-                "intelligence_summary": {},
-            }
-
-            # Analyse all targets concurrently (each target is already async-heavy)
-            analyses = await asyncio.gather(
-                *[self._comprehensive_target_analysis(t, config) for t in targets],
-                return_exceptions=True,
-            )
-
-            for target_url, analysis in zip(targets, analyses):
-                if isinstance(analysis, Exception):
-                    logger.error("Target analysis failed target=%s error=%s", target_url, analysis)
-                    results["reconnaissance_data"][target_url] = {"error": str(analysis)}
-                else:
-                    results["reconnaissance_data"][target_url] = analysis
-
-            results["intelligence_summary"] = self._generate_intelligence_summary(
-                results["reconnaissance_data"]
-            )
-
-            await self._complete_task(results, session_id)
-            logger.info("Reconnaissance complete targets=%d", len(targets))
-            return results
-
-        except Exception as exc:
-            await self._handle_error(exc, session_id)
-            raise
-
-    # ── Per-target orchestration ──────────────
-
-    async def _comprehensive_target_analysis(
-        self, target_url: str, config: dict[str, Any]
-    ) -> dict[str, Any]:
+        target_url = target_urls[0]
         parsed = urlparse(target_url)
-        domain = parsed.netloc or parsed.path  # handle bare domains too
+        if not parsed.scheme:
+            target_url = f"https://{target_url}"
+            parsed = urlparse(target_url)
+
+        depth = int(config.get("crawl_depth", 2))
+
+        ssl_ctx = self._resolve_ssl_context()
+        connector = aiohttp.TCPConnector(ssl=ssl_ctx)
 
         async with aiohttp.ClientSession(
-            connector=_make_connector(),
-            headers={"User-Agent": random.choice(self._user_agents)},
-            timeout=aiohttp.ClientTimeout(total=30, connect=10),
+            connector=connector,
+            timeout=aiohttp.ClientTimeout(total=20, connect=10),
         ) as session:
-            tasks = [
-                self._subdomain_enumeration(domain, session),
-                self._technology_stack_analysis(target_url, session),
-                self._port_reconnaissance(domain),
-                self._web_application_mapping(target_url, session, config.get("crawl_depth", 2)),
-                self._dns_intelligence(domain),
-                self._certificate_analysis(domain, session),
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            fp_task = self._fingerprint_technologies(target_url, session)
+            crawl_task = self._crawl_and_extract(target_url, session, depth)
+            common_task = self._check_common_paths(target_url, session)
+            port_task = self._port_scan(parsed.netloc)
 
-        def safe(r, default):
-            return r if not isinstance(r, Exception) else (
-                logger.debug("Recon subtask failed: %s", r) or default
+            fingerprint, crawled, common_paths, open_ports = await asyncio.gather(
+                fp_task,
+                crawl_task,
+                common_task,
+                port_task,
             )
 
-        intel = {
-            "domain":           domain,
-            "target_url":       target_url,
-            "subdomains":       safe(results[0], []),
-            "technologies":     safe(results[1], {}),
-            "open_ports":       safe(results[2], []),
-            "web_applications": safe(results[3], {}),
-            "dns_intelligence": safe(results[4], {}),
-            "certificates":     safe(results[5], {}),
-            "analysis_timestamp": time.time(),
-            "attack_surface_score": 0.0,
-        }
-        intel["attack_surface_score"] = self._calculate_attack_surface_score(intel)
-        return intel
-
-    # ── Subdomain enumeration ─────────────────
-
-    async def _subdomain_enumeration(
-        self, domain: str, session: aiohttp.ClientSession
-    ) -> list[dict[str, Any]]:
-        logger.info("Subdomain enumeration starting domain=%s", domain)
-
-        # Step 1: wildcard guard
-        if await self._has_wildcard_dns(domain):
-            logger.warning(
-                "Wildcard DNS detected on %s — brute-force skipped to avoid false positives",
-                domain,
+            js_analysis = await self._fetch_and_analyze_javascript(
+                crawled.get("script_urls", []),
+                session,
+                parsed.netloc,
             )
-            return [{"note": "wildcard_dns_detected", "domain": domain}]
 
-        # Step 2: wordlist brute-force (parallel, semaphore-gated)
-        wordlist = self._load_subdomain_wordlist()
-        sem = asyncio.Semaphore(MAX_DNS_CONCURRENCY)
-        loop = asyncio.get_running_loop()
-
-        async def resolve_one(sub: str) -> dict[str, Any] | None:
-            fqdn = f"{sub}.{domain}"
-            async with sem:
-                try:
-                    infos = await loop.getaddrinfo(fqdn, None)
-                    ip = infos[0][4][0]
-                    services = await self._check_subdomain_services(fqdn, session)
-                    return {
-                        "subdomain": fqdn,
-                        "ip_address": ip,
-                        "discovery_method": "wordlist_bruteforce",
-                        "status": "active",
-                        "services": services,
-                    }
-                except (socket.gaierror, OSError):
-                    return None
-
-        bf_results = await asyncio.gather(*[resolve_one(s) for s in wordlist])
-        discovered = [r for r in bf_results if r is not None]
-
-        # Step 3: CT log query (merges additional subdomains)
-        ct_results = await self._certificate_transparency_search(domain, session)
-
-        # Deduplicate by subdomain name
-        seen: set[str] = {r["subdomain"] for r in discovered}
-        for ct in ct_results:
-            if ct["subdomain"] not in seen:
-                discovered.append(ct)
-                seen.add(ct["subdomain"])
-
-        logger.info("Subdomain enumeration done domain=%s found=%d", domain, len(discovered))
-        return discovered
-
-    async def _has_wildcard_dns(self, domain: str) -> bool:
-        """
-        Resolve a guaranteed-nonexistent label to detect wildcard DNS.
-        If the probe resolves, every brute-force result would be a false positive.
-        """
-        probe = f"guardian-ai-wildcard-probe-{random.randint(100000, 999999)}.{domain}"
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.getaddrinfo(probe, None)
-            return True  # resolved → wildcard exists
-        except (socket.gaierror, OSError):
-            return False
-
-    def _load_subdomain_wordlist(self) -> list[str]:
-        wordlist_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..", "data", "subdomain_wordlist.txt",
+        injection_points = self._collect_injection_points(
+            crawled=crawled,
+            openapi_endpoints=common_paths.get("openapi_endpoints", []),
         )
+
+        api_endpoints = sorted(
+            set(crawled.get("endpoints", []))
+            | set(common_paths.get("openapi_endpoints", []))
+            | set(js_analysis.get("api_paths", []))
+            | set(js_analysis.get("fetch_endpoints", []))
+        )
+
+        technologies = sorted(
+            set(fingerprint.get("body_technologies", []))
+            | self._header_techs(fingerprint.get("headers", {}))
+        )
+
+        backend_language, framework = self._infer_backend_and_framework(technologies, fingerprint.get("headers", {}))
+        database_hint = self._infer_database_hint(crawled.get("page_bodies", []))
+
+        attack_surface_signals = self._build_attack_surface_signals(
+            fingerprint=fingerprint,
+            crawled=crawled,
+            common_paths=common_paths,
+            js_analysis=js_analysis,
+            database_hint=database_hint,
+        )
+
+        model = TargetModel(
+            url=target_url,
+            domain=parsed.netloc,
+            technologies=technologies,
+            waf_detected=fingerprint.get("waf_detected"),
+            backend_language=backend_language,
+            database_hint=database_hint,
+            framework=framework,
+            injection_points=injection_points,
+            forms=crawled.get("forms", []),
+            api_endpoints=api_endpoints,
+            html_comments=crawled.get("html_comments", []),
+            hardcoded_values=js_analysis.get("hardcoded_secrets", []),
+            interesting_paths=sorted(common_paths.get("found_paths", {}).keys()),
+            open_ports=open_ports,
+            attack_surface_signals=attack_surface_signals,
+            page_classifications=crawled.get("page_classifications", {}),
+        )
+
+        if estimate_tokens(json.dumps(model.to_hypothesis_context())) >= 2000:
+            logger.warning("Hypothesis context still high after truncation for domain=%s", model.domain)
+
+        return model
+
+    def _resolve_ssl_context(self) -> ssl.SSLContext | bool:
         try:
-            with open(wordlist_path) as fh:
-                return [line.strip() for line in fh if line.strip()]
-        except FileNotFoundError:
-            logger.warning("Subdomain wordlist not found at %s", wordlist_path)
-            return []
+            from guardian.core.probing.probe_executor import _build_ssl_context
 
-    async def _check_subdomain_services(
-        self, subdomain: str, session: aiohttp.ClientSession
-    ) -> list[dict[str, Any]]:
-        services = []
-        for scheme in ("http", "https"):
-            url = f"{scheme}://{subdomain}"
-            try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    text = await resp.text(errors="replace")
-                    services.append({
-                        "protocol": scheme,
-                        "status_code": resp.status,
-                        "server": resp.headers.get("Server", "Unknown"),
-                        "title": self._extract_title(text) if resp.status == 200 else None,
-                    })
-            except Exception as exc:
-                services.append({"protocol": scheme, "error": str(exc)})
-        return services
+            return _build_ssl_context()
+        except Exception:
+            if not settings.VERIFY_SSL:
+                return False
+            return ssl.create_default_context()
 
-    # ── CT log integration ────────────────────
+    async def _fingerprint_technologies(self, url: str, session: aiohttp.ClientSession) -> dict:
+        headers_out: dict[str, str] = {}
+        body_technologies: list[str] = []
+        waf_detected: str | None = None
 
-    async def _certificate_transparency_search(
-        self, domain: str, session: aiohttp.ClientSession
-    ) -> list[dict[str, Any]]:
-        """
-        Query the real crt.sh JSON API for certificate transparency log entries.
-        Returns unique subdomains not resolvable — caller deduplicates.
-        """
-        url = f"https://crt.sh/?q=%.{domain}&output=json"
-        discovered: list[dict[str, Any]] = []
+        try:
+            async with session.get(url) as resp:
+                text = await resp.text(errors="replace")
+                for key in ["Server", "X-Powered-By", "X-AspNet-Version", "X-Generator", "X-Framework"]:
+                    if key in resp.headers:
+                        headers_out[key] = resp.headers[key]
+
+                header_lower = {k.lower(): v for k, v in resp.headers.items()}
+                for key, contains, waf_name in _WAF_SIGNATURES:
+                    if key in header_lower:
+                        if not contains or contains in header_lower[key].lower():
+                            waf_detected = waf_name
+                            break
+
+                body_l = text.lower()
+                for tech, indicators in _TECH_INDICATORS.items():
+                    if any(ind.lower() in body_l for ind in indicators):
+                        body_technologies.append(tech)
+        except Exception as exc:
+            logger.warning("Technology fingerprint failed for %s: %s", url, exc)
+
+        return {
+            "headers": headers_out,
+            "body_technologies": sorted(set(body_technologies)),
+            "waf_detected": waf_detected,
+        }
+
+    async def _crawl_and_extract(self, url: str, session: aiohttp.ClientSession, depth: int) -> dict:
+        parsed_root = urlparse(url)
+        root_host = parsed_root.netloc
+
+        queue: list[tuple[str, int]] = [(url, 0)]
         seen: set[str] = set()
 
-        try:
-            async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=20)
-            ) as resp:
-                if resp.status != 200:
-                    logger.debug("crt.sh returned status=%d for domain=%s", resp.status, domain)
-                    return []
-                entries = await resp.json(content_type=None)
+        endpoints: set[str] = set()
+        forms: list[dict] = []
+        html_comments: list[str] = []
+        script_urls: set[str] = set()
+        page_classifications: dict[str, str] = {}
+        page_bodies: list[str] = []
 
-            loop = asyncio.get_running_loop()
-            sem = asyncio.Semaphore(MAX_DNS_CONCURRENCY)
+        while queue and len(seen) < 100:
+            current, level = queue.pop(0)
+            if current in seen or level > depth:
+                continue
+            seen.add(current)
+            endpoints.add(current)
 
-            subdomains_from_ct: set[str] = set()
-            for entry in entries:
-                for name in entry.get("name_value", "").splitlines():
-                    name = name.strip().lstrip("*.")
-                    if name.endswith(f".{domain}") or name == domain:
-                        subdomains_from_ct.add(name)
+            try:
+                async with session.get(current) as resp:
+                    if resp.status >= 400:
+                        continue
+                    body = await resp.text(errors="replace")
+            except Exception:
+                continue
 
-            async def resolve_ct(fqdn: str) -> dict[str, Any] | None:
-                if fqdn in seen:
-                    return None
-                async with sem:
-                    try:
-                        infos = await loop.getaddrinfo(fqdn, None)
-                        ip = infos[0][4][0]
-                        return {
-                            "subdomain": fqdn,
-                            "ip_address": ip,
-                            "discovery_method": "certificate_transparency",
-                            "status": "active",
-                            "services": [],
-                        }
-                    except (socket.gaierror, OSError):
-                        return None
+            page_bodies.append(body[:5000])
+            soup = BeautifulSoup(body, "html.parser")
+            title = (soup.title.string or "").strip() if soup.title else ""
 
-            results = await asyncio.gather(*[resolve_ct(s) for s in subdomains_from_ct])
-            for r in results:
-                if r and r["subdomain"] not in seen:
-                    discovered.append(r)
-                    seen.add(r["subdomain"])
+            extracted_forms = self._extract_forms(soup, current)
+            forms.extend(extracted_forms)
 
-            logger.info("CT log query done domain=%s ct_found=%d", domain, len(discovered))
+            for a in soup.find_all("a", href=True):
+                full = urljoin(current, a["href"])
+                p = urlparse(full)
+                if p.netloc == root_host and p.scheme in {"http", "https"} and full not in seen:
+                    queue.append((full, level + 1))
 
-        except Exception as exc:
-            logger.warning("CT log query failed domain=%s error=%s", domain, exc)
+            for sc in soup.find_all("script", src=True):
+                full = urljoin(current, sc["src"])
+                if urlparse(full).netloc == root_host:
+                    script_urls.add(full)
 
-        return discovered
+            for c in soup.find_all(string=lambda t: isinstance(t, Comment)):
+                comment_text = str(c).strip()
+                if comment_text:
+                    html_comments.append(comment_text)
 
-    # ── Technology fingerprinting ─────────────
+            classification = self._classify_page(current, extracted_forms)
+            if title:
+                classification = classification
+            page_classifications[current] = classification
 
-    async def _technology_stack_analysis(
-        self, target_url: str, session: aiohttp.ClientSession
-    ) -> dict[str, Any]:
-        logger.debug("Technology fingerprinting target=%s", target_url)
-        technologies: dict[str, list] = {
-            "web_servers": [], "frameworks": [], "cms": [],
-            "programming_languages": [], "databases": [],
-            "cdn": [], "analytics": [], "security": [],
+        return {
+            "endpoints": sorted(endpoints),
+            "forms": forms,
+            "html_comments": list(dict.fromkeys(html_comments)),
+            "script_urls": sorted(script_urls),
+            "page_classifications": page_classifications,
+            "page_bodies": page_bodies,
         }
 
-        try:
-            async with session.get(
-                target_url, timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                headers = dict(resp.headers)
-                content = await resp.text(errors="replace")
+    async def _fetch_and_analyze_javascript(
+        self,
+        script_urls: list[str],
+        session: aiohttp.ClientSession,
+        root_host: str,
+    ) -> dict:
+        api_paths: set[str] = set()
+        hardcoded_secrets: set[str] = set()
+        fetch_endpoints: set[str] = set()
 
-            server = headers.get("Server", "")
-            if server:
-                technologies["web_servers"].append(
-                    {"name": server, "confidence": "high", "source": "server_header"}
-                )
+        api_path_re = re.compile(r'["\'](/api/[^\'\"]{3,60})["\']')
+        full_url_re = re.compile(r'https?://[^\s"\']{10,150}')
+        aws_re = re.compile(r'AKIA[0-9A-Z]{16}')
+        secret_re = re.compile(r'(?:password|secret|api[_-]?key|token)["\s]*[:=]["\s]*([^\s"\']{8,})', re.I)
+        fetch_re = re.compile(r'fetch\(["\']([^\'\"]+)["\']')
+        axios_re = re.compile(r'axios\.[a-z]+\(["\']([^\'\"]+)["\']')
 
-            for header, category in [
-                ("X-Powered-By", "frameworks"),
-                ("X-AspNet-Version", "frameworks"),
-                ("X-Generator", "cms"),
-            ]:
-                if header in headers:
-                    technologies[category].append(
-                        {"name": headers[header], "confidence": "high", "source": f"{header.lower()}_header"}
-                    )
+        for script_url in script_urls[:10]:
+            try:
+                async with session.get(script_url) as resp:
+                    content = await resp.text(errors="replace")
+            except Exception:
+                continue
 
-            content_lower = content.lower()
-            content_indicators = {
-                "wordpress":       ("cms",                  ["wp-content", "wp-includes"]),
-                "drupal":          ("cms",                  ["drupal", "sites/default"]),
-                "joomla":          ("cms",                  ["joomla", "components/com_"]),
-                "react":           ("frameworks",           ["react", "_react"]),
-                "angular":         ("frameworks",           ["angular", "ng-"]),
-                "vue":             ("frameworks",           ["vue.js", "__vue__"]),
-                "jquery":          ("frameworks",           ["jquery"]),
-                "bootstrap":       ("frameworks",           ["bootstrap"]),
-                "php":             ("programming_languages", ["<?php", ".php"]),
-                "asp.net":         ("frameworks",           ["__doPostBack", "aspnet"]),
-                "cloudflare":      ("cdn",                  ["cloudflare", "__cf_bm"]),
-                "google-analytics":("analytics",            ["google-analytics", "gtag"]),
-            }
-            for tech, (category, indicators) in content_indicators.items():
-                if any(ind in content_lower for ind in indicators):
-                    technologies[category].append(
-                        {"name": tech, "confidence": "medium", "source": "content_analysis"}
-                    )
+            api_paths.update(api_path_re.findall(content))
+            hardcoded_secrets.update(aws_re.findall(content))
+            hardcoded_secrets.update(secret_re.findall(content))
 
-        except Exception as exc:
-            logger.debug("Technology analysis failed target=%s error=%s", target_url, exc)
+            for endpoint in fetch_re.findall(content) + axios_re.findall(content):
+                if endpoint.startswith("/"):
+                    fetch_endpoints.add(endpoint)
 
-        return technologies
+            for full in full_url_re.findall(content):
+                parsed = urlparse(full)
+                if parsed.netloc == root_host:
+                    api_paths.add(parsed.path)
 
-    # ── Port scanning (non-blocking) ──────────
+        return {
+            "api_paths": sorted(api_paths),
+            "hardcoded_secrets": sorted(hardcoded_secrets),
+            "fetch_endpoints": sorted(fetch_endpoints),
+        }
 
-    async def _port_reconnaissance(self, domain: str) -> list[dict[str, Any]]:
-        """
-        Run nmap in a thread-pool executor so the event loop is never blocked.
-        nmap.PortScanner.scan() is a synchronous call that can take 30-120 seconds
-        — it must never be called directly in an async context.
-        """
-        logger.info("Port scan starting domain=%s", domain)
+    async def _check_common_paths(self, url: str, session: aiohttp.ClientSession) -> dict:
+        common = [
+            "/.git/HEAD", "/api/swagger.json", "/api/openapi.json", "/swagger.json", "/openapi.json",
+            "/api/docs", "/robots.txt", "/sitemap.xml", "/.env", "/config.json", "/api/graphql", "/graphql",
+        ]
+        found_paths: dict[str, int] = {}
+        openapi_endpoints: set[str] = set()
+        graphql_available = False
+
+        for path in common:
+            full = urljoin(url, path)
+            status = None
+            try:
+                async with session.head(full) as resp:
+                    status = resp.status
+            except Exception:
+                continue
+
+            if status == 200:
+                found_paths[path] = status
+
+            if path in {"/robots.txt", "/sitemap.xml"} and status == 200:
+                try:
+                    async with session.get(full) as resp:
+                        _ = await resp.text(errors="replace")
+                except Exception:
+                    pass
+
+            if path in {"/api/swagger.json", "/api/openapi.json", "/swagger.json", "/openapi.json"} and status == 200:
+                try:
+                    async with session.get(full) as resp:
+                        spec = await resp.json(content_type=None)
+                    for p, methods in (spec.get("paths", {}) or {}).items():
+                        openapi_endpoints.add(p)
+                        if isinstance(methods, dict):
+                            for method, details in methods.items():
+                                if isinstance(details, dict):
+                                    for prm in details.get("parameters", []) or []:
+                                        _ = prm.get("name")
+                except Exception:
+                    pass
+
+            if path in {"/api/graphql", "/graphql"} and status == 200:
+                graphql_available = True
+
+        return {
+            "found_paths": found_paths,
+            "openapi_endpoints": sorted(openapi_endpoints),
+            "graphql_available": graphql_available,
+        }
+
+    async def _port_scan(self, domain: str) -> list[dict]:
         loop = asyncio.get_running_loop()
 
-        def _run_nmap() -> list[dict[str, Any]]:
-            scanner = nmap.PortScanner()
+        def _run_scan() -> list[dict]:
             try:
-                scanner.scan(hosts=domain, arguments="-F -T4 --open")
+                cmd = ["nmap", "-F", "-T4", "--open", domain]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if proc.returncode != 0:
+                    raise RuntimeError(proc.stderr.strip() or "nmap failed")
+
+                results: list[dict] = []
+                for line in proc.stdout.splitlines():
+                    m = re.match(r"^(\d+)/tcp\s+open\s+([^\s]+)\s*(.*)$", line.strip())
+                    if not m:
+                        continue
+                    results.append({
+                        "port": int(m.group(1)),
+                        "service": m.group(2),
+                        "banner": m.group(3).strip(),
+                    })
+                return results
             except Exception as exc:
-                logger.error("nmap scan failed domain=%s error=%s", domain, exc)
+                logger.warning("Port scan failed for %s: %s", domain, exc)
                 return []
 
-            ports: list[dict[str, Any]] = []
-            host_data = scanner["scan"].get(domain, {})
-            for port, data in host_data.get("tcp", {}).items():
-                if data.get("state") == "open":
-                    ports.append({
-                        "port": port,
-                        "state": "open",
-                        "service": data.get("name", "unknown"),
-                        "banner": f"{data.get('product', '')} {data.get('version', '')}".strip(),
-                    })
-            return ports
+        return await loop.run_in_executor(_NMAP_POOL, _run_scan)
 
-        try:
-            ports = await loop.run_in_executor(_BLOCKING_EXECUTOR, _run_nmap)
-            logger.info("Port scan done domain=%s open_ports=%d", domain, len(ports))
-            return ports
-        except Exception as exc:
-            logger.error("Port scan executor error domain=%s error=%s", domain, exc)
-            return []
+    def _extract_forms(self, soup: BeautifulSoup, base_url: str) -> list[dict]:
+        out: list[dict] = []
+        for form in soup.find_all("form"):
+            method = str(form.get("method", "GET")).upper()
+            action = form.get("action") or base_url
+            action_abs = action if action.startswith(("http://", "https://")) else urljoin(base_url, action)
 
-    # ── Web application crawler ───────────────
+            inputs: list[dict] = []
+            for inp in form.find_all(["input", "textarea", "select"]):
+                name = inp.get("name")
+                if not name:
+                    continue
+                inputs.append({"name": name, "type": inp.get("type", "text")})
 
-    async def _web_application_mapping(
-        self,
-        target_url: str,
-        session: aiohttp.ClientSession,
-        max_depth: int = 2,
-    ) -> dict[str, Any]:
-        """
-        Async BFS crawler.  All HTTP calls use the shared aiohttp session —
-        no synchronous requests.get() anywhere in this path.
-        """
-        logger.debug("Web crawl starting target=%s depth=%d", target_url, max_depth)
+            out.append({"action": action_abs, "method": method, "inputs": inputs})
+        return out
 
-        discovered_endpoints: set[str] = set()
-        discovered_forms: list[dict] = []
-        interesting_files: list[dict] = []
-        seen_forms: set[tuple] = set()
-
-        queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
-        await queue.put((target_url, 0))
-        crawled: set[str] = set()
-        sem = asyncio.Semaphore(MAX_HTTP_CONCURRENCY)
-
-        base_netloc = urlparse(target_url).netloc
-
-        async def crawl_one(url: str, depth: int) -> None:
-            if url in crawled or depth > max_depth:
-                return
-            crawled.add(url)
-
-            async with sem:
-                try:
-                    async with session.get(
-                        url, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=True
-                    ) as resp:
-                        if resp.status != 200:
-                            return
-                        content = await resp.read()
-                except Exception as exc:
-                    logger.debug("Crawl failed url=%s error=%s", url, exc)
-                    return
-
-            discovered_endpoints.add(url)
-            soup = BeautifulSoup(content, "html.parser")
-
-            # Enqueue same-origin links
-            if depth < max_depth:
-                for tag in soup.find_all("a", href=True):
-                    full = urljoin(url, tag["href"])
-                    if urlparse(full).netloc == base_netloc and full not in crawled:
-                        await queue.put((full, depth + 1))
-
-            # Extract unique forms
-            for form in soup.find_all("form"):
-                action = urljoin(url, form.get("action", ""))
-                inputs = sorted(
-                    inp.get("name", "") for inp in form.find_all(["input", "textarea", "select"])
-                )
-                sig = (action, tuple(inputs))
-                if sig not in seen_forms:
-                    seen_forms.add(sig)
-                    discovered_forms.append({
-                        "action": action,
-                        "method": form.get("method", "GET").upper(),
-                        "inputs": [
-                            {
-                                "name": t.get("name", ""),
-                                "type": t.get("type", "text"),
-                                "required": t.has_attr("required"),
-                            }
-                            for t in form.find_all(["input", "textarea", "select"])
-                        ],
-                    })
-
-            # Flag pages referencing interesting patterns
-            text_lower = content.decode(errors="replace").lower()
-            for pattern in ["admin", "login", "dashboard", "api", "config", "backup", "upload"]:
-                if pattern in text_lower:
-                    interesting_files.append({"url": url, "pattern": pattern})
-
-        # Drain the BFS queue with bounded concurrency
-        tasks: list[asyncio.Task] = []
-        while not queue.empty() or tasks:
-            while not queue.empty() and len(tasks) < MAX_HTTP_CONCURRENCY:
-                url, depth = await queue.get()
-                if len(crawled) >= 100:
-                    break
-                tasks.append(asyncio.create_task(crawl_one(url, depth)))
-            if tasks:
-                done, pending = await asyncio.wait(tasks, timeout=1.0, return_when=asyncio.FIRST_COMPLETED)
-                tasks = list(pending)
-
-        # Await any remaining tasks
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-        return {
-            "endpoints": list(discovered_endpoints),
-            "forms": discovered_forms,
-            "interesting_files": interesting_files,
-            "crawl_statistics": {
-                "pages_crawled": len(crawled),
-                "forms_found": len(discovered_forms),
-                "endpoints_discovered": len(discovered_endpoints),
-            },
-        }
-
-    # ── DNS intelligence ──────────────────────
-
-    async def _dns_intelligence(self, domain: str) -> dict[str, Any]:
-        loop = asyncio.get_running_loop()
-        record_types = ["A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA"]
-        dns_records: dict[str, list] = {}
-
-        def query_all() -> dict[str, list]:
-            records: dict[str, list] = {}
-            for rtype in record_types:
-                try:
-                    answers = dns.resolver.resolve(domain, rtype, lifetime=5)
-                    records[rtype] = [str(a) for a in answers]
-                except Exception:
-                    records[rtype] = []
-            return records
-
-        dns_records = await loop.run_in_executor(_BLOCKING_EXECUTOR, query_all)
-
-        return {
-            "records": dns_records,
-            "nameservers": dns_records.get("NS", []),
-            "mail_servers": dns_records.get("MX", []),
-            "txt_analysis": self._analyze_txt_records(dns_records.get("TXT", [])),
-            "subdomain_takeover_risk": self._check_subdomain_takeover_risk(dns_records),
-        }
-
-    # ── Certificate analysis ──────────────────
-
-    async def _certificate_analysis(
-        self, domain: str, session: aiohttp.ClientSession
-    ) -> dict[str, Any]:
-        cert_info: dict[str, Any] = {
-            "has_certificate": False,
-            "issuer": "Unknown",
-            "certificate_transparency": False,
-        }
-        try:
-            async with session.get(
-                f"https://{domain}", timeout=aiohttp.ClientTimeout(total=8)
-            ) as resp:
-                if resp.status:
-                    cert_info["has_certificate"] = True
-                    cert_info["certificate_transparency"] = True
-        except Exception:
-            pass
-        return cert_info
-
-    # ── Utilities ─────────────────────────────
-
-    def _extract_title(self, html: str) -> str:
-        try:
-            soup = BeautifulSoup(html, "html.parser")
-            tag = soup.find("title")
-            return tag.get_text().strip() if tag else "No Title"
-        except Exception:
-            return "Unknown"
-
-    def _analyze_txt_records(self, txt_records: list[str]) -> dict[str, Any]:
-        analysis: dict[str, Any] = {
-            "spf_record": None,
-            "dmarc_record": None,
-            "verification_tokens": [],
-            "other_records": [],
-        }
-        for rec in txt_records:
-            # dnspython returns TXT values wrapped in quotes — strip them
-            clean = rec.strip().strip('"')
-            rl = clean.lower()
-            if rl.startswith("v=spf1"):
-                analysis["spf_record"] = clean
-            elif rl.startswith("v=dmarc1"):
-                analysis["dmarc_record"] = clean
-            elif any(t in rl for t in ["google-site-verification", "facebook-domain-verification"]):
-                analysis["verification_tokens"].append(clean)
-            else:
-                analysis["other_records"].append(clean)
-        return analysis
-
-    def _check_subdomain_takeover_risk(self, dns_records: dict[str, list]) -> str:
-        vulnerable_services = [
-            "github.io", "herokuapp.com", "amazonaws.com",
-            "azure", "cloudfront.net", "fastly.com",
-        ]
-        for cname in dns_records.get("CNAME", []):
-            if any(svc in cname.lower() for svc in vulnerable_services):
-                return "Potential Risk"
-        return "Low Risk"
-
-    def _calculate_attack_surface_score(self, intel: dict[str, Any]) -> float:
-        score = 0.0
-        score += len(intel.get("subdomains", [])) * 0.1
-        score += len(intel.get("open_ports", [])) * 0.2
-        web = intel.get("web_applications", {})
-        score += len(web.get("endpoints", [])) * 0.05
-        score += len(web.get("forms", [])) * 0.3
-        for tech_list in intel.get("technologies", {}).values():
-            score += len(tech_list) * 0.1
-        return round(min(10.0, score), 2)
-
-    def _generate_intelligence_summary(self, recon_data: dict[str, Any]) -> dict[str, Any]:
-        total_subdomains = sum(len(d.get("subdomains", [])) for d in recon_data.values())
-        total_ports = sum(len(d.get("open_ports", [])) for d in recon_data.values())
-        total_endpoints = sum(
-            len(d.get("web_applications", {}).get("endpoints", []))
-            for d in recon_data.values()
+    def _classify_page(self, url: str, forms: list[dict]) -> str:
+        lower = url.lower()
+        has_password = any(
+            i.get("type", "").lower() == "password"
+            for f in forms for i in f.get("inputs", [])
         )
-        high_value = [
-            {
-                "target": url,
-                "attack_surface_score": d.get("attack_surface_score", 0),
-                "subdomains": len(d.get("subdomains", [])),
-                "open_ports": len(d.get("open_ports", [])),
-            }
-            for url, d in recon_data.items()
-            if d.get("attack_surface_score", 0) > 5.0
-        ]
-        return {
-            "targets_analyzed": len(recon_data),
-            "total_subdomains_discovered": total_subdomains,
-            "total_open_ports": total_ports,
-            "total_endpoints": total_endpoints,
-            "high_value_targets": sorted(
-                high_value, key=lambda x: x["attack_surface_score"], reverse=True
-            ),
-            "reconnaissance_completion": "comprehensive",
-        }
+        has_file = any(
+            i.get("type", "").lower() == "file"
+            for f in forms for i in f.get("inputs", [])
+        )
+
+        if "/login" in lower or "/signin" in lower or has_password:
+            return "login_page"
+        if "/admin" in lower or "/dashboard" in lower:
+            return "admin_page"
+        if "/upload" in lower or has_file:
+            return "upload_page"
+        if "/api/" in lower:
+            return "api_endpoint"
+        return "general"
+
+    def _collect_injection_points(self, crawled: dict, openapi_endpoints: list[str]) -> list[dict]:
+        points: dict[tuple[str, str, str], dict] = {}
+
+        for endpoint in crawled.get("endpoints", []):
+            parsed = urlparse(endpoint)
+            params = parse_qs(parsed.query)
+            base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            for param in params:
+                key = (base, param, "GET")
+                points[key] = {
+                    "url": base,
+                    "method": "GET",
+                    "param_name": param,
+                    "param_type": "query",
+                    "context_hint": "query parameter from crawl",
+                    "other_params": {},
+                }
+
+        for form in crawled.get("forms", []):
+            method = str(form.get("method", "GET")).upper()
+            action = form.get("action", "")
+            for inp in form.get("inputs", []):
+                name = inp.get("name")
+                if not name:
+                    continue
+                key = (action, name, method)
+                points[key] = {
+                    "url": action,
+                    "method": method,
+                    "param_name": name,
+                    "param_type": "form" if method == "POST" else "query",
+                    "context_hint": f"form input ({inp.get('type', 'text')})",
+                    "other_params": {},
+                }
+
+        for ep in openapi_endpoints:
+            key = (ep, "id", "GET")
+            points.setdefault(key, {
+                "url": ep,
+                "method": "GET",
+                "param_name": "id",
+                "param_type": "query",
+                "context_hint": "OpenAPI-discovered endpoint",
+                "other_params": {},
+            })
+
+        return list(points.values())
+
+    def _infer_database_hint(self, page_bodies: list[str]) -> str | None:
+        corpus = "\n".join(page_bodies).lower()
+        if any(p in corpus for p in ["mysql", "sql syntax", "you have an error in your sql"]):
+            return "MySQL"
+        if any(p in corpus for p in ["postgresql", "pg_", "psql:"]):
+            return "PostgreSQL"
+        if any(p in corpus for p in ["ora-", "oracle"]):
+            return "Oracle"
+        return None
+
+    def _header_techs(self, headers: dict[str, str]) -> set[str]:
+        out: set[str] = set()
+        joined = " ".join(f"{k}:{v}" for k, v in headers.items()).lower()
+        if "php" in joined:
+            out.add("php")
+        if "asp.net" in joined:
+            out.add("asp.net")
+        if "nginx" in joined:
+            out.add("nginx")
+        if "apache" in joined:
+            out.add("apache")
+        return out
+
+    def _infer_backend_and_framework(self, technologies: list[str], headers: dict[str, str]) -> tuple[str | None, str | None]:
+        tech_set = set(t.lower() for t in technologies)
+        backend = None
+        framework = None
+
+        if "php" in tech_set:
+            backend = "PHP"
+        elif "django" in tech_set:
+            backend = "Python"
+            framework = "Django"
+        elif "rails" in tech_set:
+            backend = "Ruby"
+            framework = "Rails"
+        elif "laravel" in tech_set:
+            backend = "PHP"
+            framework = "Laravel"
+
+        if framework is None:
+            if "wordpress" in tech_set:
+                framework = "WordPress"
+            elif "react" in tech_set:
+                framework = "React"
+            elif "angular" in tech_set:
+                framework = "Angular"
+            elif "vue" in tech_set:
+                framework = "Vue"
+
+        if backend is None and "X-AspNet-Version" in headers:
+            backend = "ASP.NET"
+
+        return backend, framework
+
+    def _build_attack_surface_signals(
+        self,
+        fingerprint: dict,
+        crawled: dict,
+        common_paths: dict,
+        js_analysis: dict,
+        database_hint: str | None,
+    ) -> list[str]:
+        signals: list[str] = []
+
+        if fingerprint.get("waf_detected"):
+            signals.append(f"WAF detected: {fingerprint['waf_detected']}")
+
+        if database_hint:
+            signals.append(f"Database hint indicates {database_hint}")
+
+        for comment in crawled.get("html_comments", [])[:10]:
+            if any(k in comment.lower() for k in ["todo", "password", "debug", "key"]):
+                signals.append(f"HTML comment contains potentially sensitive note: {comment[:120]}")
+
+        for endpoint in js_analysis.get("fetch_endpoints", [])[:10]:
+            signals.append(f"JavaScript file reveals endpoint {endpoint}")
+
+        for path, status in common_paths.get("found_paths", {}).items():
+            if status == 200:
+                if path == "/.git/HEAD":
+                    signals.append("/.git/HEAD returns 200 — source code may be accessible")
+                else:
+                    signals.append(f"Interesting path {path} returned 200")
+
+        return list(dict.fromkeys(signals))

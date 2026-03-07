@@ -217,6 +217,18 @@ class Database:
             """, (session_id, agent_name, error, datetime.utcnow().isoformat()))
             await db.commit()
 
+    async def save_agent_result(self, session_id: str, agent_name: str, results: dict[str, Any]) -> None:
+        await self.save_agent_results(session_id, agent_name, results)
+
+    async def upsert_node(self, graph_id: str, node: dict[str, Any]) -> None:
+        await self.save_agent_results(graph_id, "graph_node", node)
+
+    async def upsert_graph_meta(self, graph_id: str, meta: dict[str, Any]) -> None:
+        await self.save_agent_results(graph_id, "graph_meta", meta)
+
+    async def upsert_edge(self, graph_id: str, edge: dict[str, Any]) -> None:
+        await self.save_agent_results(graph_id, "graph_edge", edge)
+
     # ── Health / statistics ───────────────────
 
     async def get_statistics(self) -> dict[str, Any]:

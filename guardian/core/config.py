@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from pydantic import model_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Anchor: directory containing this file → .../guardian/core/
 _HERE = Path(__file__).resolve().parent
@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # ── AI / Ollama ───────────────────────────
     OLLAMA_BASE_URL: str = "http://ollama:11434"
-    DEFAULT_MODEL: str = "mistral:latest"
+    DEFAULT_MODEL: str = "mixtral:latest"
 
     # ── API ───────────────────────────────────
     API_V1_STR: str = "/api/v1"
@@ -142,9 +142,10 @@ class Settings(BaseSettings):
 
         return warnings
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
 
 
 # Global singleton — import this everywhere
