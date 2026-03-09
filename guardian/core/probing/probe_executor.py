@@ -85,7 +85,12 @@ class ProbeExecutor:
         return cls(session)
 
     async def close(self):
-        await self._session.close()
+        close_fn = getattr(self._session, "close", None)
+        if close_fn is None:
+            return
+        out = close_fn()
+        if asyncio.iscoroutine(out):
+            await out
 
     @classmethod
     def build_injection_point(cls, data: dict) -> InjectionPoint:
@@ -183,6 +188,11 @@ class ProbeExecutor:
         elif point.param_type == "header":
             headers = {point.param_name: probe_value}
             async with self._session.request(method, point.url, headers=headers) as resp:
+                body = await resp.text(errors="replace")
+                return self._make_result(resp, body, point, probe_value)
+        elif point.param_type == "cookie":
+            cookies = {point.param_name: probe_value}
+            async with self._session.request(method, point.url, cookies=cookies) as resp:
                 body = await resp.text(errors="replace")
                 return self._make_result(resp, body, point, probe_value)
         elif method == "POST":

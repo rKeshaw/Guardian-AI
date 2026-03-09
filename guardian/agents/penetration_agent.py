@@ -6,6 +6,7 @@ import asyncio
 import logging
 import random
 import time
+import re
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -306,6 +307,20 @@ class PenetrationAgent(BaseAgent):
                         url=base, method="GET", param_name=param, source="query"
                     ))
 
+        template_re = re.compile(r"\{([^}]+)\}")
+        for endpoint in web.get("endpoints", []):
+            for param_name in template_re.findall(endpoint):
+                clean_url = template_re.sub("", endpoint)
+                key = (clean_url, "GET", param_name)
+                if key not in seen:
+                    seen.add(key)
+                    points.append(InjectionPoint(
+                        url=clean_url,
+                        method="GET",
+                        param_name=param_name,
+                        source="query",
+                    ))
+                    
         # From HTML forms
         for form in web.get("forms", []):
             raw_action = form.get("action") or target_url

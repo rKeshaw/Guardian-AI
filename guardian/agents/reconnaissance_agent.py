@@ -102,6 +102,8 @@ class ReconnaissanceAgent:
         injection_points = self._collect_injection_points(
             crawled=crawled,
             openapi_endpoints=common_paths.get("openapi_endpoints", []),
+            js_fetch_endpoints=js_analysis.get("fetch_endpoints", []),
+            root_url=target_url,
         )
 
         api_endpoints = sorted(
@@ -559,7 +561,13 @@ class ReconnaissanceAgent:
             return "api_endpoint"
         return "general"
 
-    def _collect_injection_points(self, crawled: dict, openapi_endpoints: list[str]) -> list[dict]:
+    def _collect_injection_points(
+        self,
+        crawled: dict,
+        openapi_endpoints: list[str],
+        js_fetch_endpoints: list[str],
+        root_url: str,
+    ) -> list[dict]:
         points: dict[tuple[str, str, str], dict] = {}
 
         for endpoint in crawled.get("endpoints", []):
@@ -577,9 +585,11 @@ class ReconnaissanceAgent:
                     "other_params": {},
                 }
 
+        form_actions: set[str] = set()
         for form in crawled.get("forms", []):
             method = str(form.get("method", "GET")).upper()
             action = form.get("action", "")
+            form_actions.add(action)
             for inp in form.get("inputs", []):
                 name = inp.get("name")
                 if not name:
@@ -594,6 +604,7 @@ class ReconnaissanceAgent:
                     "other_params": {},
                 }
 
+        template_re = re.compile(r"\{([^}]+)\}")
         for ep in openapi_endpoints:
             key = (ep, "id", "GET")
             points.setdefault(key, {
@@ -602,6 +613,35 @@ class ReconnaissanceAgent:
                 "param_name": "id",
                 "param_type": "query",
                 "context_hint": "OpenAPI-discovered endpoint",
+                "other_params": {},
+            })
+
+            for param_name in template_re.findall(ep):
+                clean_url = template_re.sub("", ep)
+                clean_url = clean_url if clean_url.startswith(("http://", "https://")) else urljoin(root_url, clean_url)
+                key_tpl = (clean_url, param_name, "GET")
+                points.setdefault(key_tpl, {
+                    "url": clean_url,
+                    "method": "GET",
+                    "param_name": param_name,
+                    "param_type": "query",
+                    "context_hint": "OpenAPI path template parameter",
+                    "other_params": {},
+                })
+
+        for endpoint in js_fetch_endpoints:
+            if "/api/" not in endpoint:
+                continue
+            endpoint_url = endpoint if endpoint.startswith(("http://", "https://")) else urljoin(root_url, endpoint)
+            if endpoint_url in form_actions:
+                continue
+            key = (endpoint_url, "data", "POST")
+            points.setdefault(key, {
+                "url": endpoint_url,
+                "method": "POST",
+                "param_name": "data",
+                "param_type": "json",
+                "context_hint": "JS fetch/axios API endpoint",
                 "other_params": {},
             })
 

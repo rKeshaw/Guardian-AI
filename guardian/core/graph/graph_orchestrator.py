@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 from typing import Any
 
@@ -205,7 +206,13 @@ class GraphOrchestrator:
         target_cost = threshold_tokens * 0.5
 
         for idx, node in enumerate(graph.compressible_nodes()[:10], start=1):
-            unit = self.comprehender.compress(json.dumps(node.data, sort_keys=True), node.type.value)
+            loop = asyncio.get_running_loop()
+            unit = await loop.run_in_executor(
+                None,
+                self.comprehender.compress,
+                json.dumps(node.data, sort_keys=True),
+                node.type.value,
+            )
             content = str(unit.get("content", ""))
             facts = list(unit.get("irreducible_facts", []))
             compressed_tokens = estimate_tokens(content)

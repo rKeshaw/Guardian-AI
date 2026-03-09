@@ -141,3 +141,32 @@ async def test_option_a_deduplicates_existing_hypothesis(monkeypatch):
 
     assert added == 0
     assert len(ctx.graph.nodes) == 1
+
+def test_select_entry_probe_a03_email():
+    orch = CentralOrchestrator(Database())
+    probe = orch._select_entry_probe("A03:2023", {"param_name": "email", "param_type": "query"}, "SQL Injection")
+    assert probe == "test@test.com'"
+
+
+def test_select_entry_probe_a03_id():
+    orch = CentralOrchestrator(Database())
+    probe = orch._select_entry_probe("A03:2023", {"param_name": "id", "param_type": "query"}, "SQL Injection")
+    assert probe == "1 AND 1=2"
+
+
+def test_select_entry_probe_a03_ssti_vuln_name():
+    orch = CentralOrchestrator(Database())
+    probe = orch._select_entry_probe("A03:2023", {"param_name": "name", "param_type": "query"}, "SSTI Template Injection")
+    assert probe == "{{7*7}}"
+
+
+def test_select_entry_probe_a07_token():
+    orch = CentralOrchestrator(Database())
+    probe = orch._select_entry_probe("A07:2023", {"param_name": "access_token", "param_type": "query"}, "Auth Bypass")
+    assert probe == "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZG1pbiJ9."
+
+
+def test_select_entry_probe_a01_filepath():
+    orch = CentralOrchestrator(Database())
+    probe = orch._select_entry_probe("A01:2023", {"param_name": "filepath", "param_type": "query"}, "Path traversal")
+    assert probe == "../../../../etc/passwd"

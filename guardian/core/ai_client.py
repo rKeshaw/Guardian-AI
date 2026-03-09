@@ -225,7 +225,10 @@ class AIClient:
             )
 
         model_name = model or self.default_model
-        options: dict[str, Any] = {"format": "json"}
+        options: dict[str, Any] = {}
+        # Assumption: all current personas/callers expect JSON output. Keep
+        # format="json" at the top-level chat() call and preserve downstream
+        # parse/validation fallbacks for schema conformance and recovery.
         if persona and persona.value in self._personas:
             cfg = self._personas[persona.value]
             options["temperature"] = cfg.get("temperature", 0.3)
@@ -238,6 +241,7 @@ class AIClient:
                 resp = client.chat(
                     model=model_name,
                     messages=messages,
+                    format="json",
                     options=options,
                 )
                 if resp and "message" in resp:

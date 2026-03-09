@@ -3,4 +3,10 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
   "anyio: mark test as requiring AnyIO/async test support",
+  "real_http: real HTTP calls to DVWA, no LLM (fast, ~5s per test)",
+  "real_llm: real Ollama + real DVWA (medium, 30s-2min per test)",
+  "integration: full pipeline end-to-end (slow, up to 15min)",
+  "timeout: per-test timeout hint",
 ]
+timeout = 300
+

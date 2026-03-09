@@ -6,11 +6,13 @@ import asyncio
 import logging
 import os
 import traceback
+import socket
+import ipaddress
 from datetime import datetime
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, AnyHttpUrl, Field
@@ -38,15 +40,68 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+from guardian.core.config import settings
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ALLOW_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ── Globals ────────────────────────────────────
+
+def verify_api_key(x_api_key: str = Header(default="")) -> None:
+    key = settings.API_KEY
+    if key and x_api_key != key:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+def _denied_networks() -> list[ipaddress._BaseNetwork]:
+    cidrs = [c.strip() for c in str(settings.SCAN_TARGET_DENY_CIDRS or "").split(",") if c.strip()]
+    out: list[ipaddress._BaseNetwork] = []
+    for cidr in cidrs:
+        try:
+            out.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            logger.warning("Invalid SCAN_TARGET_DENY_CIDRS entry ignored: %s", cidr)
+    return out
+
+
+def validate_scan_target(url: str) -> None:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        return
+
+    denied = _denied_networks()
+    try:
+        infos = socket.getaddrinfo(hostname, parsed.port or 443, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return
+    except Exception:
+        return
+
+    for info in infos:
+        sockaddr = info[4]
+        ip_raw = sockaddr[0] if isinstance(sockaddr, tuple) and sockaddr else ""
+        try:
+            ip_obj = ipaddress.ip_address(ip_raw)
+        except ValueError:
+            continue
+
+        if any(ip_obj in net for net in denied):
+            raise HTTPException(status_code=400, detail="Target is in a denied network range")
+
+        if settings.SCAN_TARGET_ALLOW_EXTERNAL_ONLY:
+            if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
+                raise HTTPException(status_code=400, detail="Target is in a denied network range")
+            if getattr(ip_obj, "is_reserved", False) or getattr(ip_obj, "is_unspecified", False):
+                raise HTTPException(status_code=400, detail="Target is in a denied network range")
+            
 database = None
 orchestrator = None
 startup_error: str | None = None
@@ -144,14 +199,17 @@ async def dashboard():
 </body></html>"""
 
 
-@app.post("/api/v1/scan/start", response_model=ScanResponse, status_code=202)
+@app.post("/api/v1/scan/start", response_model=ScanResponse, status_code=202, dependencies=[Depends(verify_api_key)])
 async def start_scan(scan_request: ScanRequest):
     if not orchestrator:
         raise HTTPException(503, detail=f"Orchestrator unavailable. {startup_error or ''}")
+    target_urls = [str(url) for url in scan_request.target_urls]
+    for target in target_urls:
+        validate_scan_target(target)
 
     try:
         session_id = await orchestrator.start_scan(
-            [str(url) for url in scan_request.target_urls],
+            target_urls,
             scan_request.config or {},
         )
     except RuntimeError as exc:
@@ -165,7 +223,7 @@ async def start_scan(scan_request: ScanRequest):
     )
 
 
-@app.get("/api/v1/scan/{session_id}/status")
+@app.get("/api/v1/scan/{session_id}/status", dependencies=[Depends(verify_api_key)])
 async def get_scan_status(session_id: str):
     from guardian.core.config import settings
     if not orchestrator:
@@ -206,7 +264,7 @@ async def get_scan_status(session_id: str):
         "results": status_data.get("results_preview", {}),
     })
 
-@app.get("/api/v1/scan/{session_id}/graph")
+@app.get("/api/v1/scan/{session_id}/graph", dependencies=[Depends(verify_api_key)])
 async def get_scan_graph(session_id: str):
     if not orchestrator:
         raise HTTPException(503, detail="Orchestrator unavailable.")
@@ -221,7 +279,7 @@ async def get_scan_graph(session_id: str):
 
     return JSONResponse(content=build_graph_response(graph))
 
-@app.get("/api/v1/scan/{session_id}/results")
+@app.get("/api/v1/scan/{session_id}/results", dependencies=[Depends(verify_api_key)])
 async def get_scan_results(session_id: str):
     if not database:
         raise HTTPException(503, detail="Database unavailable.")
@@ -231,7 +289,7 @@ async def get_scan_results(session_id: str):
     return JSONResponse(content={"session_id": session_id, "results": results})
 
 
-@app.delete("/api/v1/scan/{session_id}")
+@app.delete("/api/v1/scan/{session_id}", dependencies=[Depends(verify_api_key)])
 async def stop_scan(session_id: str):
     if not orchestrator:
         raise HTTPException(503, detail="Orchestrator unavailable.")
@@ -244,7 +302,6 @@ async def stop_scan(session_id: str):
 
 @app.get("/api/v1/health")
 async def health_check():
-    from guardian.core.config import settings
     port = os.environ.get("GUARDIAN_PORT", "8888")
     health = orchestrator.get_workflow_health() if orchestrator else {}
     return {

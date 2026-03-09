@@ -41,3 +41,17 @@ def test_differential_indicators_flags_specific_sql_syntax_error():
     indicators = agent._differential_indicators(test, baseline, "A03:2023")
 
     assert any("you have an error in your sql syntax" in i.lower() for i in indicators)
+
+def test_discover_injection_points_extracts_path_template_param():
+    agent = PenetrationAgent(None)
+    points = agent._discover_injection_points(
+        "https://example.com",
+        {
+            "web_applications": {
+                "endpoints": ["https://example.com/api/users/{id}"],
+                "forms": [],
+            }
+        },
+    )
+
+    assert any(p.param_name == "id" and p.method == "GET" for p in points)

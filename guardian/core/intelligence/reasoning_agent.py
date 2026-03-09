@@ -30,6 +30,14 @@ _DEFAULTS: dict[str, Any] = {
     "terminal_reason": None,
 }
 
+def _parse_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    if isinstance(value, int):
+        return value != 0
+    return default
 
 class ReasoningAgent:
     def __init__(self, ai_client, comprehender, probe_executor, ledger) -> None:
@@ -383,8 +391,8 @@ set exploitation_evidence to a dict with keys:
             out["refuted_facts"] = []
 
         out["confidence"] = max(0, min(100, int(out.get("confidence", 0))))
-        out["terminal"] = bool(out.get("terminal", False))
-        out["exploitation_confirmed"] = bool(out.get("exploitation_confirmed", False))
+        out["terminal"] = _parse_bool(out.get("terminal", False), default=False)
+        out["exploitation_confirmed"] = _parse_bool(out.get("exploitation_confirmed", False), default=False)
 
         for key in ["observation", "updated_hypothesis", "next_probe", "probe_rationale", "terminal_reason"]:
             val = out.get(key)

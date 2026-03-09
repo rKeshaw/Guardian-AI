@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     MAX_GRAPH_TOKENS: int = 50000
     GRAPH_COMPRESS_THRESHOLD: float = 0.8
     MAX_TURNS_PER_HYPOTHESIS: int = 6
+    MAX_CONCURRENT_SCANS: int = 3
 
     # ── Probe execution pacing ────────────────
     PROBE_DELAY_MIN: float = 0.5
@@ -46,6 +47,8 @@ class Settings(BaseSettings):
     ENABLE_VULN_ANALYSIS_SEEDING: bool = False
     ENABLE_RAG_PROBING: bool = False
     ENABLE_ACTIVE_CONFIRMATION: bool = False
+    ENABLE_PAYLOAD_GENERATION: bool = False
+    ENABLE_ACTIVE_PENETRATION: bool = False
 
     # ── Reserved / currently unused — planned for future features ─
     # Kept for backward compatibility with existing deployments/.env files.
@@ -57,6 +60,10 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     SECRET_KEY: str = "guardian-ai-secret-key-change-in-production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    API_KEY: str = ""
+    SCAN_TARGET_DENY_CIDRS: str = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,169.254.0.0/16,::1/128,fc00::/7"
+    SCAN_TARGET_ALLOW_EXTERNAL_ONLY: bool = True
+    CORS_ALLOW_ORIGINS: List[str] = ["*"]
 
     # ── Agent concurrency ─────────────────────
     MAX_CONCURRENT_AGENTS: int = 5
@@ -180,6 +187,10 @@ class Settings(BaseSettings):
             logger.info("Integration feature flag enabled: ENABLE_RAG_PROBING")
         if self.ENABLE_ACTIVE_CONFIRMATION:
             logger.info("Integration feature flag enabled: ENABLE_ACTIVE_CONFIRMATION")
+        if self.ENABLE_PAYLOAD_GENERATION:
+            logger.info("Integration feature flag enabled: ENABLE_PAYLOAD_GENERATION")
+        if self.ENABLE_ACTIVE_PENETRATION:
+            logger.info("Integration feature flag enabled: ENABLE_ACTIVE_PENETRATION")
 
         db_dir = Path(self.get_db_path()).parent
         if not os.access(db_dir, os.W_OK):

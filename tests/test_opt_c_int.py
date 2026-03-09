@@ -16,6 +16,9 @@ class _DummyClientSession:
     def __init__(self, *args, **kwargs):
         pass
 
+    async def close(self):
+        return None
+
     async def __aenter__(self):
         return self
 
@@ -143,3 +146,133 @@ async def test_confirm_finding_without_payload_returns_expected_reason():
 
     assert result["http_confirmed"] is False
     assert result["reason"] == "no_payload_in_evidence"
+
+@pytest.mark.anyio
+async def test_active_confirmation_passes_bearer_auth_header_to_session(monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_ACTIVE_CONFIRMATION", True)
+
+    captured = {"auth": None}
+
+    class _DummyProbeExecutor:
+        def __init__(self):
+            self._session = SimpleNamespace(headers={})
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    dummy = _DummyProbeExecutor()
+
+    async def _create(auth_headers=None, cookies=None):
+        if auth_headers:
+            dummy._session.headers.update(auth_headers)
+        return dummy
+
+    async def _auth(self, auth, session):
+        captured["auth"] = auth
+        return True
+
+    async def _fake_confirm(self, finding_node, recon_data, session):
+        assert session.headers.get("Authorization") == "Bearer tok"
+        return {"finding_id": finding_node.id, "http_confirmed": False, "new_indicators": []}
+
+    import guardian.core.probing.probe_executor as pe_module
+
+    class _PE:
+        @classmethod
+        async def create(cls, auth_headers=None, cookies=None):
+            return await _create(auth_headers=auth_headers, cookies=cookies)
+
+    monkeypatch.setattr(pe_module, "ProbeExecutor", _PE)
+    monkeypatch.setattr("guardian.core.probing.session_manager.SessionManager.authenticate", _auth)
+    monkeypatch.setattr(PenetrationAgent, "confirm_finding", _fake_confirm)
+
+    orchestrator = CentralOrchestrator(Database())
+    ctx = ScanContext(session_id="sess-c-auth", target_urls=["https://target.com"], config={"auth": {"type": "bearer", "bearer_token": "tok"}})
+    ctx.graph.add_node(_finding_node(with_payload=True))
+    ctx.phase_results["reconnaissance"] = {"url": "https://target.com"}
+
+    await orchestrator._run_active_confirmation(ctx)
+
+    assert captured["auth"]["bearer_token"] == "tok"
+
+
+@pytest.mark.anyio
+async def test_active_confirmation_runs_without_auth_config(monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_ACTIVE_CONFIRMATION", True)
+
+    class _DummyProbeExecutor:
+        def __init__(self):
+            self._session = SimpleNamespace(headers={})
+        async def close(self):
+            return None
+
+    async def _create(auth_headers=None, cookies=None):
+        return _DummyProbeExecutor()
+
+    async def _auth(self, auth, session):
+        return True
+
+    async def _fake_confirm(self, finding_node, recon_data, session):
+        return {"finding_id": finding_node.id, "http_confirmed": False, "new_indicators": []}
+
+    import guardian.core.probing.probe_executor as pe_module
+
+    class _PE:
+        @classmethod
+        async def create(cls, auth_headers=None, cookies=None):
+            return await _create(auth_headers=auth_headers, cookies=cookies)
+
+    monkeypatch.setattr(pe_module, "ProbeExecutor", _PE)
+    monkeypatch.setattr("guardian.core.probing.session_manager.SessionManager.authenticate", _auth)
+    monkeypatch.setattr(PenetrationAgent, "confirm_finding", _fake_confirm)
+
+    orchestrator = CentralOrchestrator(Database())
+    ctx = ScanContext(session_id="sess-c-no-auth", target_urls=["https://target.com"], config={})
+    ctx.graph.add_node(_finding_node(with_payload=True))
+    ctx.phase_results["reconnaissance"] = {"url": "https://target.com"}
+
+    result = await orchestrator._run_active_confirmation(ctx)
+    assert result["skipped"] is False
+
+
+@pytest.mark.anyio
+async def test_active_confirmation_closes_probe_executor_on_error(monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_ACTIVE_CONFIRMATION", True)
+
+    class _DummyProbeExecutor:
+        def __init__(self):
+            self._session = SimpleNamespace(headers={})
+            self.closed = False
+        async def close(self):
+            self.closed = True
+
+    dummy = _DummyProbeExecutor()
+
+    async def _create(auth_headers=None, cookies=None):
+        return dummy
+
+    async def _auth(self, auth, session):
+        return True
+
+    async def _boom_confirm(self, finding_node, recon_data, session):
+        raise RuntimeError("confirm failed")
+
+    import guardian.core.probing.probe_executor as pe_module
+
+    class _PE:
+        @classmethod
+        async def create(cls, auth_headers=None, cookies=None):
+            return await _create(auth_headers=auth_headers, cookies=cookies)
+
+    monkeypatch.setattr(pe_module, "ProbeExecutor", _PE)
+    monkeypatch.setattr("guardian.core.probing.session_manager.SessionManager.authenticate", _auth)
+    monkeypatch.setattr(PenetrationAgent, "confirm_finding", _boom_confirm)
+
+    orchestrator = CentralOrchestrator(Database())
+    ctx = ScanContext(session_id="sess-c-close", target_urls=["https://target.com"], config={})
+    ctx.graph.add_node(_finding_node(with_payload=True))
+    ctx.phase_results["reconnaissance"] = {"url": "https://target.com"}
+
+    with pytest.raises(RuntimeError):
+        await orchestrator._run_active_confirmation(ctx)

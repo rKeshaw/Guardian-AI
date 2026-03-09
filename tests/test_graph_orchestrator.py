@@ -269,3 +269,25 @@ def test_select_next_small_frontier_does_not_create_priority_queue():
 
     assert selected is not None
     assert orchestrator._priority_queue is None
+
+@pytest.mark.anyio
+async def test_compress_graph_offloads_to_thread_pool(monkeypatch):
+    import threading
+
+    db = DummyDB()
+    graph = AttackGraph()
+    node = _hypothesis_node("h-thread")
+    node.token_estimate = 2000
+    graph.add_node(node)
+
+    calls = {"thread_name": None}
+
+    def _compress(content, content_type):
+        calls["thread_name"] = threading.current_thread().name
+        return {"content": content[:20], "irreducible_facts": []}
+
+    orch = GraphOrchestrator(ai_client=SimpleNamespace(), comprehender=SimpleNamespace(compress=_compress), db=db)
+    await orch._compress_graph(graph, TokenLedger(total=100000))
+
+    assert calls["thread_name"] is not None
+    assert calls["thread_name"] != threading.current_thread().name

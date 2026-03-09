@@ -20,6 +20,8 @@ from guardian.core.token_ledger import TokenLedger
 from guardian.core.pipeline_contracts import (
     GraphExplorationPhaseOutput,
     HypothesisPhaseOutput,
+    PayloadPhaseOutput,
+    PenetrationPhaseOutput,
     ReconPhaseOutput,
     ReportPhaseOutput,
     ScanPhaseResults,
@@ -50,6 +52,8 @@ class ScanContext:
     typed_phase_results: ScanPhaseResults = field(default_factory=ScanPhaseResults)
     agent_metrics: dict[str, Any] = field(default_factory=dict)
     agents: dict[str, Any] = field(default_factory=dict)
+    pipeline_degraded: bool = False
+    failed_phases: list[str] = field(default_factory=list)
 
     graph: AttackGraph = field(default_factory=AttackGraph)
     ledger: TokenLedger = field(default_factory=lambda: TokenLedger(total=settings.MAX_GRAPH_TOKENS * 2))
@@ -66,12 +70,13 @@ class ScanContext:
 
 
 class CentralOrchestrator:
-    MAX_CONCURRENT_SCANS: int = 5
     SESSION_TTL_SECONDS: int = 3600
     PIPELINE_PHASES: tuple[str, ...] = (
         "reconnaissance",
         "vulnerability_analysis",
         "hypothesis_seeding",
+        "payload_generation",
+        "active_penetration",
         "graph_exploration",
         "active_confirmation",
         "reporting",
@@ -80,7 +85,9 @@ class CentralOrchestrator:
         "reconnaissance": 15.0,
         "vulnerability_analysis": 10.0,
         "hypothesis_seeding": 10.0,
-        "graph_exploration": 45.0,
+        "payload_generation": 5.0,
+        "active_penetration": 10.0,
+        "graph_exploration": 35.0,
         "active_confirmation": 10.0,
         "reporting": 10.0,
     }
@@ -88,6 +95,7 @@ class CentralOrchestrator:
     def __init__(self, db: Database) -> None:
         self.db = db
         self._registry: dict[str, ScanContext] = {}
+        self.MAX_CONCURRENT_SCANS = int(settings.MAX_CONCURRENT_SCANS)
         self._semaphore = asyncio.BoundedSemaphore(self.MAX_CONCURRENT_SCANS)
         self._cleanup_task: asyncio.Task | None = None
         self._active_scans: int = 0
@@ -179,14 +187,27 @@ class CentralOrchestrator:
         await self._save_session(ctx)
 
         try:
-            await self._run_phase(ctx, "reconnaissance", {})
-            await self._run_phase(ctx, "vulnerability_analysis", {})
-            await self._run_phase(ctx, "hypothesis_seeding", {})
-            await self._run_phase(ctx, "graph_exploration", {})
-            await self._run_phase(ctx, "active_confirmation", {})
-            await self._run_phase(ctx, "reporting", {})
+            await self._run_phase(ctx, "reconnaissance")
+            await self._run_phase(ctx, "vulnerability_analysis")
+            await self._run_phase(ctx, "hypothesis_seeding")
+            await self._run_phase(ctx, "payload_generation")
+            await self._run_phase(ctx, "active_penetration")
+            await self._run_phase(ctx, "graph_exploration")
+            await self._run_phase(ctx, "active_confirmation")
+            await self._run_phase(ctx, "reporting")
 
-            ctx.status = ScanStatus.COMPLETED
+            failed_required = [
+                phase for phase in ctx.failed_phases
+                if self._is_required_phase(phase)
+            ]
+            if failed_required:
+                ctx.status = ScanStatus.ERROR
+                ctx.error_message = (
+                    "Pipeline degraded: required phase(s) failed: "
+                    + ", ".join(sorted(set(failed_required)))
+                )
+            else:
+                ctx.status = ScanStatus.COMPLETED
             ctx.completed_at = datetime.utcnow()
             await self._save_session(ctx)
 
@@ -198,9 +219,81 @@ class CentralOrchestrator:
             ctx.completed_at = datetime.utcnow()
             await self._save_session(ctx)
 
-    async def _run_phase(self, ctx: ScanContext, phase_name: str, task_data: dict[str, Any]) -> dict[str, Any]:
+    def _is_required_phase(self, phase_name: str) -> bool:
+        if phase_name == "vulnerability_analysis":
+            return bool(settings.ENABLE_VULN_ANALYSIS_SEEDING)
+        if phase_name == "active_confirmation":
+            return bool(settings.ENABLE_ACTIVE_CONFIRMATION)
+        if phase_name == "payload_generation":
+            return bool(settings.ENABLE_PAYLOAD_GENERATION)
+        if phase_name == "active_penetration":
+            return bool(settings.ENABLE_ACTIVE_PENETRATION)
+        return phase_name in {"reconnaissance", "hypothesis_seeding", "graph_exploration", "reporting"}
+
+    async def _run_phase(self, ctx: ScanContext, phase_name: str) -> dict[str, Any]:
         t0 = datetime.utcnow()
         ctx.agents[phase_name] = {"status": "running"}
+
+        if phase_name == "vulnerability_analysis" and not settings.ENABLE_VULN_ANALYSIS_SEEDING:
+            result = VulnAnalysisPhaseOutput(
+                overall_risk_level="Unknown",
+                vulnerabilities=[],
+                skipped=True,
+            ).model_dump()
+            ctx.results[phase_name] = result
+            ctx.phase_results[phase_name] = result
+            self._record_typed_phase_result(ctx, phase_name, result)
+            duration = (datetime.utcnow() - t0).total_seconds()
+            ctx.agent_metrics[phase_name] = {
+                "execution_time_s": round(duration, 2),
+                "success": True,
+                "skipped": True,
+            }
+            ctx.agents[phase_name] = {"status": "completed", "skipped": True}
+            return result
+
+        if phase_name == "active_confirmation" and not settings.ENABLE_ACTIVE_CONFIRMATION:
+            result = {"skipped": True, "active_confirmation_results": []}
+            ctx.results[phase_name] = result
+            ctx.phase_results[phase_name] = result
+            self._record_typed_phase_result(ctx, phase_name, result)
+            duration = (datetime.utcnow() - t0).total_seconds()
+            ctx.agent_metrics[phase_name] = {
+                "execution_time_s": round(duration, 2),
+                "success": True,
+                "skipped": True,
+            }
+            ctx.agents[phase_name] = {"status": "completed", "skipped": True}
+            return result
+
+        if phase_name == "payload_generation" and not settings.ENABLE_PAYLOAD_GENERATION:
+            result = {"payload_arsenal": [], "source": "disabled", "skipped": True}
+            ctx.results[phase_name] = result
+            ctx.phase_results[phase_name] = result
+            self._record_typed_phase_result(ctx, phase_name, result)
+            duration = (datetime.utcnow() - t0).total_seconds()
+            ctx.agent_metrics[phase_name] = {
+                "execution_time_s": round(duration, 2),
+                "success": True,
+                "skipped": True,
+            }
+            ctx.agents[phase_name] = {"status": "completed", "skipped": True}
+            return result
+
+        if phase_name == "active_penetration" and not settings.ENABLE_ACTIVE_PENETRATION:
+            result = {"penetration_results": {}, "evidence_package": {}, "successful_exploits": [], "skipped": True}
+            ctx.results[phase_name] = result
+            ctx.phase_results[phase_name] = result
+            self._record_typed_phase_result(ctx, phase_name, result)
+            duration = (datetime.utcnow() - t0).total_seconds()
+            ctx.agent_metrics[phase_name] = {
+                "execution_time_s": round(duration, 2),
+                "success": True,
+                "skipped": True,
+            }
+            ctx.agents[phase_name] = {"status": "completed", "skipped": True}
+            return result
+        
         try:
             if phase_name == "reconnaissance":
                 result = await self._run_reconnaissance(ctx)
@@ -208,6 +301,10 @@ class CentralOrchestrator:
                 result = await self._run_vulnerability_analysis(ctx)
             elif phase_name == "hypothesis_seeding":
                 result = await self._run_hypothesis_seeding(ctx)
+            elif phase_name == "payload_generation":
+                result = await self._run_payload_generation(ctx)
+            elif phase_name == "active_penetration":
+                result = await self._run_active_penetration(ctx)
             elif phase_name == "graph_exploration":
                 result = await self._run_graph_exploration(ctx)
             elif phase_name == "active_confirmation":
@@ -231,6 +328,9 @@ class CentralOrchestrator:
                 "success": False,
                 "error": str(exc),
             }
+            ctx.pipeline_degraded = True
+            if phase_name not in ctx.failed_phases:
+                ctx.failed_phases.append(phase_name)
             ctx.agents[phase_name] = {"status": "failed", "error": str(exc)}
             logger.error("Phase failed phase=%s session_id=%s error=%s", phase_name, ctx.session_id, exc)
             return {}
@@ -352,14 +452,7 @@ class CentralOrchestrator:
                 if dedup_key in existing_keys or not dedup_key[0] or not dedup_key[1]:
                     continue
 
-                if owasp_category.startswith("A03"):
-                    entry_probe = "'"
-                elif owasp_category.startswith("A07"):
-                    entry_probe = "admin' OR '1'='1"
-                elif owasp_category.startswith("A10"):
-                    entry_probe = "http://169.254.169.254"
-                else:
-                    entry_probe = "test"
+                entry_probe = self._select_entry_probe(owasp_category, matched_ip, vulnerability_name)
 
                 hypothesis = {
                     "hypothesis": f"{vulnerability_name} via {vector_text}",
@@ -390,6 +483,48 @@ class CentralOrchestrator:
 
         return seeded
 
+    @staticmethod
+    def _select_entry_probe(owasp_category: str, injection_point: dict[str, Any], vulnerability_name: str) -> str:
+        param_name = str(injection_point.get("param_name", "")).lower()
+        param_type = str(injection_point.get("param_type", "query")).lower()
+        cat = owasp_category.upper()
+        vuln_lower = vulnerability_name.lower()
+
+        if cat.startswith("A03"):
+            if "email" in param_name or "mail" in param_name:
+                return "test@test.com'"
+            if "id" in param_name or "num" in param_name or "page" in param_name:
+                return "1 AND 1=2"
+            if "template" in vuln_lower or "ssti" in vuln_lower:
+                return "{{7*7}}"
+            if "xml" in vuln_lower or "xxe" in vuln_lower:
+                return "<?xml version=\"1.0\"?><!DOCTYPE test [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><test>&xxe;</test>"
+            if "command" in vuln_lower or "rce" in vuln_lower:
+                return ";id"
+            if param_type == "json":
+                return '{"$gt": ""}'
+            return "'"
+
+        if cat.startswith("A07"):
+            if "token" in param_name or "jwt" in param_name:
+                return "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZG1pbiJ9."
+            if param_type == "json":
+                return '{"username": "admin", "password": {"$ne": ""}}'
+            return "' OR '1'='1"
+
+        if cat.startswith("A10"):
+            return "http://169.254.169.254/latest/meta-data/"
+
+        if cat.startswith("A01"):
+            if "file" in param_name or "path" in param_name or "dir" in param_name:
+                return "../../../../etc/passwd"
+            return "../../../etc/passwd"
+
+        if cat.startswith("A02") or cat.startswith("A05"):
+            return "true"
+
+        return "probe_test_" + param_name[:8] if param_name else "probe_test"
+    
     async def _run_hypothesis_seeding(self, ctx: ScanContext) -> dict[str, Any]:
         from guardian.agents.hypothesis_agent import HypothesisAgent
         from guardian.core.ai_client import ai_client
@@ -414,6 +549,72 @@ class CentralOrchestrator:
             "seeded_from_vuln_analysis": seeded_from_vuln,
         }
         ctx.phase_results["hypothesis_seeding"] = result
+        return result
+    
+    async def _run_payload_generation(self, ctx: ScanContext) -> dict[str, Any]:
+        if not settings.ENABLE_PAYLOAD_GENERATION:
+            return {"payload_arsenal": [], "source": "disabled", "skipped": True}
+
+        from guardian.agents.payload_agent import PayloadGenerationAgent
+
+        vuln_data = ctx.phase_results.get("vulnerability_analysis", {})
+        recon_output = ctx.phase_results.get("reconnaissance", {})
+        target_url = recon_output.get("url", "unknown_target")
+        task_data = {
+            "session_id": ctx.session_id,
+            "vulnerability_data": vuln_data,
+            "reconnaissance_data": {
+                "targets_analyzed": 1,
+                "reconnaissance_data": {
+                    target_url: recon_output,
+                },
+            },
+        }
+        result = await PayloadGenerationAgent(self.db).execute(task_data)
+        ctx.phase_results["payload_generation"] = result
+        return result
+
+    async def _run_active_penetration(self, ctx: ScanContext) -> dict[str, Any]:
+        if not settings.ENABLE_ACTIVE_PENETRATION:
+            return {"penetration_results": {}, "evidence_package": {}, "successful_exploits": [], "skipped": True}
+
+        from guardian.agents.penetration_agent import PenetrationAgent
+
+        payload_data = ctx.phase_results.get("payload_generation", {})
+        payload_arsenal = payload_data.get("payload_arsenal", []) if isinstance(payload_data, dict) else []
+        if not payload_arsenal:
+            return {
+                "penetration_results": {},
+                "evidence_package": {},
+                "successful_exploits": [],
+                "skipped": True,
+                "reason": "empty_payload_arsenal",
+            }
+
+        recon_output = ctx.phase_results.get("reconnaissance", {})
+        target_url = recon_output.get("url", "unknown_target")
+        task_data = {
+            "session_id": ctx.session_id,
+            "payloads": payload_data,
+            "targets": {
+                "reconnaissance_data": {
+                    target_url: {
+                        "web_applications": {
+                            "endpoints": recon_output.get("api_endpoints", []),
+                            "forms": recon_output.get("forms", []),
+                        }
+                    }
+                }
+            },
+        }
+        result = await PenetrationAgent(self.db).execute(task_data)
+        successful_exploits: list[dict[str, Any]] = []
+        if isinstance(result.get("penetration_results"), dict):
+            for _target, target_result in result["penetration_results"].items():
+                if isinstance(target_result, dict):
+                    successful_exploits.extend(target_result.get("successful_exploits", []))
+        result["successful_exploits"] = successful_exploits
+        ctx.phase_results["active_penetration"] = result
         return result
 
     async def _run_graph_exploration(self, ctx: ScanContext) -> dict[str, Any]:
@@ -482,19 +683,55 @@ class CentralOrchestrator:
                 "reason": "no_findings_to_confirm",
             }
 
-        import aiohttp
         from guardian.agents.penetration_agent import PenetrationAgent
+        from guardian.core.probing.probe_executor import ProbeExecutor
+        from guardian.core.probing.session_manager import SessionManager
 
         recon_data = ctx.phase_results.get("reconnaissance", {})
         ssl_context = False if not settings.VERIFY_SSL else ssl.create_default_context()
-        connector = aiohttp.TCPConnector(ssl=ssl_context, limit=10)
-        timeout = aiohttp.ClientTimeout(total=20, connect=8)
-        headers = {"User-Agent": random.choice(settings.USER_AGENTS)}
+        auth = ctx.config.get("auth", {})
+        auth_headers = None
+        if auth.get("type") == "bearer":
+            auth_headers = {"Authorization": f"Bearer {auth.get('bearer_token', '')}"}
+        cookies = auth.get("cookies") if isinstance(auth.get("cookies"), dict) else None
+
+        probe_executor = None
+        if hasattr(ProbeExecutor, "create"):
+            probe_executor = await ProbeExecutor.create(auth_headers=auth_headers, cookies=cookies)
+        else:
+            import aiohttp
+
+            headers = {"User-Agent": random.choice(settings.USER_AGENTS)}
+            if auth_headers:
+                headers.update(auth_headers)
+            session = aiohttp.ClientSession(headers=headers)
+            if cookies:
+                session.cookie_jar.update_cookies(cookies)
+
+            class _SessionWrapper:
+                def __init__(self, sess):
+                    self._session = sess
+                async def close(self):
+                    close_fn = getattr(self._session, "close", None)
+                    if close_fn is None:
+                        return
+                    out = close_fn()
+                    if asyncio.iscoroutine(out):
+                        await out
+
+            probe_executor = _SessionWrapper(session)
+
+        auth_ok = await SessionManager().authenticate(auth, getattr(probe_executor, "_session", None)) if getattr(probe_executor, "_session", None) is not None else True
+        if not auth_ok:
+            logger.warning("Authentication failed for active confirmation session_id=%s", ctx.session_id)
 
         agent = PenetrationAgent(self.db)
         results: list[dict[str, Any]] = []
 
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=headers) as session:
+        try:
+            session = getattr(probe_executor, "_session", None)
+            if session is None:
+                raise RuntimeError("probe_executor_session_unavailable")
             for finding in findings:
                 result = await agent.confirm_finding(finding, recon_data, session)
                 results.append(result)
@@ -507,6 +744,8 @@ class CentralOrchestrator:
                     )
 
                 await asyncio.sleep(random.uniform(settings.PROBE_DELAY_MIN, settings.PROBE_DELAY_MAX))
+        finally:
+            await probe_executor.close()
 
         if ctx.typed_phase_results.graph_exploration:
             ctx.typed_phase_results.graph_exploration.active_confirmation_results = results
@@ -568,6 +807,23 @@ class CentralOrchestrator:
                 **result,
             }
             ctx.typed_phase_results.hypothesis_seeding = HypothesisPhaseOutput.model_validate(data)
+        elif phase_name == "payload_generation":
+            data = {
+                "payload_arsenal": result.get("payload_arsenal", []),
+                "source": result.get("source", ""),
+                "skipped": bool(result.get("skipped", False)),
+                **result,
+            }
+            ctx.typed_phase_results.payload_generation = PayloadPhaseOutput.model_validate(data)
+        elif phase_name == "active_penetration":
+            data = {
+                "penetration_results": result.get("penetration_results", {}),
+                "evidence_package": result.get("evidence_package", {}),
+                "successful_exploits": result.get("successful_exploits", []),
+                "skipped": bool(result.get("skipped", False)),
+                **result,
+            }
+            ctx.typed_phase_results.active_penetration = PenetrationPhaseOutput.model_validate(data)
         elif phase_name == "graph_exploration":
             data = {
                 "finding_count": int(result.get("finding_count", result.get("findings", 0))),
@@ -638,6 +894,8 @@ class CentralOrchestrator:
         recon = ctx.results.get("reconnaissance", {})
         vuln = ctx.results.get("vulnerability_analysis", {})
         seed = ctx.results.get("hypothesis_seeding", {})
+        payload = ctx.results.get("payload_generation", {})
+        active_pentest = ctx.results.get("active_penetration", {})
         explore = ctx.results.get("graph_exploration", {})
         active_confirm = ctx.results.get("active_confirmation", {})
         report = ctx.results.get("reporting", {})
@@ -656,6 +914,16 @@ class CentralOrchestrator:
             "hypothesis_seeding": {
                 "completed": "hypothesis_seeding" in ctx.results,
                 "hypotheses_generated": seed.get("hypotheses_generated", 0),
+            },
+            "payload_generation": {
+                "completed": "payload_generation" in ctx.results,
+                "skipped": payload.get("skipped", False),
+                "payload_count": len(payload.get("payload_arsenal", [])) if isinstance(payload.get("payload_arsenal", []), list) else 0,
+            },
+            "active_penetration": {
+                "completed": "active_penetration" in ctx.results,
+                "skipped": active_pentest.get("skipped", False),
+                "successful_exploits": len(active_pentest.get("successful_exploits", [])) if isinstance(active_pentest.get("successful_exploits", []), list) else 0,
             },
             "graph_exploration": {
                 "completed": "graph_exploration" in ctx.results,

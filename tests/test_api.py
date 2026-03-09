@@ -136,3 +136,82 @@ async def test_status_fallback_to_db():
     body = r.json()
     assert body["session_id"] == "sess-1"
     assert body["status"] == "completed"
+
+@pytest.mark.anyio
+async def test_start_scan_requires_api_key_when_configured(monkeypatch):
+    import guardian.api.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "API_KEY", "secret")
+    monkeypatch.setattr(main_module, "validate_scan_target", lambda _u: None)
+
+    orch = SimpleNamespace(start_scan=AsyncMock(return_value="sess-123"))
+    main_module.orchestrator = orch
+    main_module.database = object()
+
+    async with await _client_with(main_module) as client:
+        r = await client.post("/api/v1/scan/start", json={"target_urls": ["https://example.com"], "config": {}})
+
+    assert r.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_start_scan_allows_without_api_key_when_not_configured(monkeypatch):
+    import guardian.api.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "API_KEY", "")
+    monkeypatch.setattr(main_module, "validate_scan_target", lambda _u: None)
+
+    orch = SimpleNamespace(start_scan=AsyncMock(return_value="sess-123"))
+    main_module.orchestrator = orch
+    main_module.database = object()
+
+    async with await _client_with(main_module) as client:
+        r = await client.post("/api/v1/scan/start", json={"target_urls": ["https://example.com"], "config": {}})
+
+    assert r.status_code == 202
+
+
+def test_validate_scan_target_denies_private_ip(monkeypatch):
+    import guardian.api.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "SCAN_TARGET_ALLOW_EXTERNAL_ONLY", True)
+    monkeypatch.setattr(main_module.settings, "SCAN_TARGET_DENY_CIDRS", "10.0.0.0/8,192.168.0.0/16")
+    monkeypatch.setattr(main_module.socket, "getaddrinfo", lambda *a, **k: [(None, None, None, None, ("192.168.1.1", 443))])
+
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        main_module.validate_scan_target("https://intranet.local")
+    assert "denied network range" in str(exc.value)
+
+
+def test_validate_scan_target_denies_metadata_ip(monkeypatch):
+    import guardian.api.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "SCAN_TARGET_ALLOW_EXTERNAL_ONLY", True)
+    monkeypatch.setattr(main_module.settings, "SCAN_TARGET_DENY_CIDRS", "169.254.0.0/16")
+    monkeypatch.setattr(main_module.socket, "getaddrinfo", lambda *a, **k: [(None, None, None, None, ("169.254.169.254", 443))])
+
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        main_module.validate_scan_target("https://metadata.local")
+    assert "denied network range" in str(exc.value)
+
+
+def test_validate_scan_target_allows_public_ip(monkeypatch):
+    import guardian.api.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "SCAN_TARGET_ALLOW_EXTERNAL_ONLY", True)
+    monkeypatch.setattr(main_module.settings, "SCAN_TARGET_DENY_CIDRS", "10.0.0.0/8")
+    monkeypatch.setattr(main_module.socket, "getaddrinfo", lambda *a, **k: [(None, None, None, None, ("93.184.216.34", 443))])
+
+    main_module.validate_scan_target("https://example.com")
+
+
+def test_validate_scan_target_dns_failure_allowed(monkeypatch):
+    import guardian.api.main as main_module
+
+    def _boom(*args, **kwargs):
+        raise main_module.socket.gaierror("dns failure")
+
+    monkeypatch.setattr(main_module.socket, "getaddrinfo", _boom)
+    main_module.validate_scan_target("https://unknown.invalid")

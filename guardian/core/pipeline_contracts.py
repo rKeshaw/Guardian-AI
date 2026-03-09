@@ -40,6 +40,23 @@ class VulnAnalysisPhaseOutput(BaseModel):
     skipped: bool = False
 
 
+class PayloadPhaseOutput(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    payload_arsenal: list[dict]
+    source: str
+    skipped: bool = False
+
+
+class PenetrationPhaseOutput(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    penetration_results: dict
+    evidence_package: dict
+    successful_exploits: list[dict] = Field(default_factory=list)
+    skipped: bool = False
+
+
 class GraphExplorationPhaseOutput(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -64,5 +81,7 @@ class ScanPhaseResults(BaseModel):
     reconnaissance: ReconPhaseOutput | None = None
     vulnerability_analysis: VulnAnalysisPhaseOutput | None = None
     hypothesis_seeding: HypothesisPhaseOutput | None = None
+    payload_generation: PayloadPhaseOutput | None = None
+    active_penetration: PenetrationPhaseOutput | None = None
     graph_exploration: GraphExplorationPhaseOutput | None = None
     reporting: ReportPhaseOutput | None = None

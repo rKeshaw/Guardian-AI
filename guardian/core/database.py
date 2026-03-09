@@ -66,6 +66,37 @@ class Database:
                     error       TEXT NOT NULL,
                     created_at  TEXT NOT NULL
                 );
+                                   
+                CREATE TABLE IF NOT EXISTS graph_nodes (
+                    graph_id            TEXT NOT NULL,
+                    node_id             TEXT NOT NULL,
+                    node_type           TEXT NOT NULL,
+                    content             TEXT,
+                    data                TEXT NOT NULL DEFAULT '{}',
+                    depth               INTEGER DEFAULT 0,
+                    confidence          REAL DEFAULT 0.5,
+                    token_estimate      INTEGER DEFAULT 0,
+                    compressed_summary  TEXT,
+                    compressed_tokens   INTEGER,
+                    updated_at          TEXT NOT NULL,
+                    PRIMARY KEY (graph_id, node_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS graph_edges (
+                    graph_id    TEXT NOT NULL,
+                    source_id   TEXT NOT NULL,
+                    target_id   TEXT NOT NULL,
+                    edge_type   TEXT NOT NULL,
+                    PRIMARY KEY (graph_id, source_id, target_id, edge_type)
+                );
+
+                CREATE TABLE IF NOT EXISTS graph_meta (
+                    graph_id        TEXT NOT NULL PRIMARY KEY,
+                    session_id      TEXT,
+                    stats           TEXT NOT NULL DEFAULT '{}',
+                    frontier_size   INTEGER DEFAULT 0,
+                    updated_at      TEXT NOT NULL
+                );
 
                 CREATE INDEX IF NOT EXISTS idx_agent_results_session
                     ON agent_results(session_id);
@@ -221,14 +252,69 @@ class Database:
         await self.save_agent_results(session_id, agent_name, results)
 
     async def upsert_node(self, graph_id: str, node: dict[str, Any]) -> None:
-        await self.save_agent_results(graph_id, "graph_node", node)
+        await self.initialize()
+        now = datetime.utcnow().isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO graph_nodes
+                    (graph_id, node_id, node_type, content, data, depth, confidence,
+                     token_estimate, compressed_summary, compressed_tokens, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    graph_id,
+                    str(node.get("id", "")),
+                    str(node.get("type", "")),
+                    str(node.get("content", "")),
+                    json.dumps(node.get("data", {}), default=str),
+                    int(node.get("depth", 0)),
+                    float(node.get("confidence", 0.5)),
+                    int(node.get("token_estimate", 0)),
+                    json.dumps(node.get("compressed_summary"), default=str) if node.get("compressed_summary") is not None else None,
+                    int(node.get("compressed_tokens")) if node.get("compressed_tokens") is not None else None,
+                    now,
+                ),
+            )
+            await db.commit()
 
     async def upsert_graph_meta(self, graph_id: str, meta: dict[str, Any]) -> None:
-        await self.save_agent_results(graph_id, "graph_meta", meta)
+        await self.initialize()
+        now = datetime.utcnow().isoformat()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO graph_meta
+                    (graph_id, session_id, stats, frontier_size, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    graph_id,
+                    str(meta.get("session_id", "")) if meta.get("session_id") is not None else None,
+                    json.dumps(meta.get("stats", {}), default=str),
+                    int(meta.get("frontier_size", 0)),
+                    now,
+                ),
+            )
+            await db.commit()
 
     async def upsert_edge(self, graph_id: str, edge: dict[str, Any]) -> None:
-        await self.save_agent_results(graph_id, "graph_edge", edge)
-
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO graph_edges
+                    (graph_id, source_id, target_id, edge_type)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    graph_id,
+                    str(edge.get("source_id", "")),
+                    str(edge.get("target_id", "")),
+                    str(edge.get("type", "")),
+                ),
+            )
+            await db.commit()
     # ── Health / statistics ───────────────────
 
     async def get_statistics(self) -> dict[str, Any]:

@@ -248,3 +248,32 @@ async def test_js_fetch_endpoint_extracted(monkeypatch):
     model = await agent.run([url], {"crawl_depth": 0})
 
     assert "/api/v2/admin/users" in model.api_endpoints
+
+def test_collect_injection_points_extracts_openapi_path_param():
+    agent = ReconnaissanceAgent(db=None)
+    points = agent._collect_injection_points(
+        crawled={"endpoints": [], "forms": []},
+        openapi_endpoints=["/api/users/{id}"],
+        js_fetch_endpoints=[],
+        root_url="https://example.com",
+    )
+
+    assert any(p.get("param_name") == "id" for p in points)
+
+
+def test_collect_injection_points_adds_js_api_json_point():
+    agent = ReconnaissanceAgent(db=None)
+    points = agent._collect_injection_points(
+        crawled={"endpoints": [], "forms": []},
+        openapi_endpoints=[],
+        js_fetch_endpoints=["/api/users"],
+        root_url="https://example.com",
+    )
+
+    assert any(
+        p.get("url") == "https://example.com/api/users"
+        and p.get("method") == "POST"
+        and p.get("param_type") == "json"
+        and p.get("param_name") == "data"
+        for p in points
+    )

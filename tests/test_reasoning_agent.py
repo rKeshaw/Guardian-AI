@@ -286,3 +286,54 @@ def test_build_injection_point_missing_required_fields_returns_none():
 
     assert missing_url is None
     assert missing_param is None
+
+def test_normalize_llm_response_parses_string_false_booleans():
+    out = ReasoningAgent._normalize_llm_response({
+        "terminal": "false",
+        "exploitation_confirmed": "false",
+        "confidence": 50,
+        "next_probe": "x",
+    })
+
+    assert out is not None
+    assert out["terminal"] is False
+    assert out["exploitation_confirmed"] is False
+
+
+def test_normalize_llm_response_parses_string_true_booleans():
+    out = ReasoningAgent._normalize_llm_response({
+        "terminal": "true",
+        "exploitation_confirmed": "true",
+    })
+
+    assert out is not None
+    assert out["terminal"] is True
+    assert out["exploitation_confirmed"] is True
+
+
+def test_normalize_llm_response_native_booleans_pass_through():
+    out_false = ReasoningAgent._normalize_llm_response({
+        "terminal": False,
+        "exploitation_confirmed": False,
+    })
+    out_true = ReasoningAgent._normalize_llm_response({
+        "terminal": True,
+        "exploitation_confirmed": True,
+    })
+
+    assert out_false is not None and out_false["terminal"] is False and out_false["exploitation_confirmed"] is False
+    assert out_true is not None and out_true["terminal"] is True and out_true["exploitation_confirmed"] is True
+
+
+def test_normalize_llm_response_parses_integer_booleans():
+    out_zero = ReasoningAgent._normalize_llm_response({
+        "terminal": 0,
+        "exploitation_confirmed": 0,
+    })
+    out_one = ReasoningAgent._normalize_llm_response({
+        "terminal": 1,
+        "exploitation_confirmed": 1,
+    })
+
+    assert out_zero is not None and out_zero["terminal"] is False and out_zero["exploitation_confirmed"] is False
+    assert out_one is not None and out_one["terminal"] is True and out_one["exploitation_confirmed"] is True
