@@ -20,6 +20,7 @@ class ResponseProfile:
     new_headers: dict[str, str]
     error: str | None
     extracted_facts: list[str] = field(default_factory=list)
+    time_anomaly: bool = False
 
     def to_prompt_dict(self) -> dict[str, Any]:
         return {
@@ -29,6 +30,7 @@ class ResponseProfile:
             "length_delta": self.length_delta,
             "length_ratio": round(self.length_ratio, 2),
             "time_delta_ms": round(self.time_delta_ms, 1),
+            "time_anomaly": self.time_anomaly,
             "new_content_preview": self.new_content[:500],
             "extracted_facts": self.extracted_facts,
             "error": self.error,
@@ -39,7 +41,7 @@ class ResponseAnalyzer:
     def __init__(self) -> None:
         self._comprehender = Comprehender()
 
-    def analyze(self, current: Any, baseline: Any | None) -> ResponseProfile:
+    def analyze(self, current: Any, baseline: Any | None, threshold_ms: float = 4000.0) -> ResponseProfile:
         if getattr(current, "is_error", False):
             return ResponseProfile(
                 status_code=0,
@@ -54,6 +56,7 @@ class ResponseAnalyzer:
                 new_headers={},
                 error=getattr(current, "error", None),
                 extracted_facts=[],
+                
             )
 
         from guardian.core.probing.probe_executor import ProbeExecutor
@@ -71,6 +74,7 @@ class ResponseAnalyzer:
             new_content=str(delta.get("new_content", ""))[:3000],
             new_headers={str(k): str(v) for k, v in dict(delta.get("new_headers", {})).items()},
             error=getattr(current, "error", None),
+            time_anomaly=float(delta.get("time_delta_ms", 0.0)) > float(threshold_ms),
         )
         profile.extracted_facts = self._comprehender._extract_facts(
             f"{profile.new_content} {profile.new_headers}"

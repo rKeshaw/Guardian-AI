@@ -77,3 +77,17 @@ def test_near_duplicate_sync_exact():
     tried = {comprehender._normalize_probe("' OR 1=1--")}
     candidate = comprehender._normalize_probe("' OR 1=1--")
     assert candidate in tried
+
+def test_normalize_probe_sql_boolean_semantic_equivalence():
+    comprehender = Comprehender()
+    assert comprehender._normalize_probe("' OR 1=1--") == comprehender._normalize_probe("' OR 2=2--")
+
+
+def test_normalize_probe_path_traversal_semantic_equivalence():
+    comprehender = Comprehender()
+    assert comprehender._normalize_probe("../../etc/passwd") == comprehender._normalize_probe("%2e%2e%2f%2e%2e%2fetc%2fpasswd")
+
+
+def test_normalize_probe_xss_script_semantic_equivalence():
+    comprehender = Comprehender()
+    assert comprehender._normalize_probe("<script>alert(1)</script>") == comprehender._normalize_probe("<script>alert(2)</script>")

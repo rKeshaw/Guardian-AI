@@ -35,3 +35,38 @@ def test_snapshot_by_component():
     ledger.charge(200, component="comprehender")
 
     assert ledger.snapshot()["by_component"] == {"recon": 100, "comprehender": 200}
+
+def test_allocate_sub_budget_total():
+    ledger = TokenLedger(total=1000)
+    sub = ledger.allocate_sub_budget(500, component="hypothesis_1")
+
+    assert sub.total == 500
+
+
+def test_sub_budget_charge_updates_parent():
+    ledger = TokenLedger(total=5000)
+    ledger.charge(1000, component="recon")
+    sub = ledger.allocate_sub_budget(2000, component="hypothesis_1")
+
+    assert sub.charge(500, component="turn_1") is True
+    assert ledger.used == 1500
+
+
+def test_sub_budget_exhaustion_blocks_charge_with_parent_remaining():
+    ledger = TokenLedger(total=5000)
+    sub = ledger.allocate_sub_budget(500, component="hypothesis_1")
+
+    assert sub.charge(500, component="turn_1") is True
+    assert sub.charge(1, component="turn_2") is False
+    assert ledger.remaining() > 0
+
+
+def test_sub_budget_release_returns_unused_to_parent():
+    ledger = TokenLedger(total=10000)
+    ledger.charge(1000, component="recon")
+    sub = ledger.allocate_sub_budget(2000, component="hypothesis_1")
+
+    assert sub.charge(500, component="turn_1") is True
+    sub.release()
+
+    assert ledger.used == 1000

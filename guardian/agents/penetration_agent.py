@@ -6,6 +6,7 @@ import asyncio
 import logging
 import random
 import time
+import statistics
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,6 +18,8 @@ from pydantic import BaseModel, Field
 from guardian.agents.base_agent import BaseAgent
 from guardian.core.ai_client import ai_client, AIPersona
 from guardian.core.config import settings
+from guardian.core.graph.attack_graph import Node
+from guardian.core.probing.probe_executor import ProbeExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -35,18 +38,34 @@ _OWASP_IMPACT_WEIGHT: dict[str, int] = {
 }
 
 _SUCCESS_INDICATORS: dict[str, list[str]] = {
-    "A01:2023": ["admin", "root:", "uid=0", "unauthorized", "/etc/passwd"],
+    "A01:2023": [
+        "root:x:0:0",
+        "uid=0(root)",
+        "passwd:",  # kept despite length<8; highly specific /etc/passwd artifact
+        "[boot loader]",
+        "/etc/passwd",
+    ],
     "A02:2023": ["-----BEGIN", "private key", "encryption key"],
     "A03:2023": [
-        "syntax error", "mysql_fetch", "ora-", "you have an error in your sql",
-        "sqlite_version", "information_schema", "pg_sleep", "sleep(", "benchmark(",
+        "syntax error",
+        "you have an error in your sql syntax",
+        "warning: mysql_",
+        "pg_query():",
+        "sqlite_exec",
+        "information_schema",
+        "unclosed quotation mark",
+        "quoted string not properly terminated",
+        "benchmark(",
     ],
     "A05:2023": ["directory listing", "index of /", "phpinfo()", "server-status"],
-    "A07:2023": ["login successful", "welcome back", "authentication bypassed"],
+    "A07:2023": ["authentication bypassed", "admin panel"],
     "A08:2023": ["deserialization error", "unserialize("],
     "A10:2023": ["169.254.169.254", "localhost", "127.0.0.1", "internal service"],
 }
 
+# NOTE: Indicators shorter than 8 chars are generally avoided due to high
+# false-positive risk. Any short indicator retained should be very specific to
+# exploitation artifacts and not generic page text.
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data structures
@@ -97,6 +116,7 @@ class PenetrationAgent(BaseAgent):
         super().__init__(db, "PenetrationAgent")
         self._user_agents: list[str] = settings.USER_AGENTS
         self._stealth_delay_range: tuple[float, float] = (0.5, 1.5)
+        self._time_threshold: float = 4000.0
 
     # ── Entry point ───────────────────────────
 
@@ -138,6 +158,51 @@ class PenetrationAgent(BaseAgent):
         except Exception as exc:
             await self._handle_error(exc, session_id)
             raise
+
+    async def confirm_finding(
+        self,
+        finding_node: Node,
+        recon_data: dict,
+        session: aiohttp.ClientSession,
+    ) -> dict:
+        try:
+            injection_point_data = finding_node.data.get("injection_point", {})
+            exploitation_evidence = finding_node.data.get("exploitation_evidence", {})
+            payload_str = ""
+            if isinstance(exploitation_evidence, dict):
+                payload_str = str(exploitation_evidence.get("payload_used", "")).strip()
+
+            if not payload_str:
+                return {
+                    "finding_id": finding_node.id,
+                    "http_confirmed": False,
+                    "reason": "no_payload_in_evidence",
+                }
+
+            point = ProbeExecutor.build_injection_point(injection_point_data)
+            baseline = await self._capture_baseline(point, session)
+            test_result = await self._execute_payload(point, payload_str, session)
+            category = str(finding_node.data.get("owasp_category", ""))
+            new_indicators = self._differential_indicators(test_result, baseline, category)
+            is_confirmed = bool(new_indicators)
+
+            return {
+                "finding_id": finding_node.id,
+                "hypothesis": finding_node.data.get("hypothesis"),
+                "owasp_category": finding_node.data.get("owasp_category"),
+                "payload_tested": payload_str,
+                "http_confirmed": is_confirmed,
+                "new_indicators": new_indicators,
+                "impact_level": self._assess_impact_level(category, new_indicators, test_result, baseline) if is_confirmed else "None",
+                "response_snippet": str(test_result.evidence.get("response_snippet", ""))[:500],
+                "status_code": test_result.status_code,
+            }
+        except Exception as exc:
+            return {
+                "finding_id": finding_node.id,
+                "http_confirmed": False,
+                "reason": str(exc),
+            }
 
     # ── Target execution ──────────────────────
 
@@ -296,13 +361,23 @@ class PenetrationAgent(BaseAgent):
             *[capture_one(pt) for pt in points],
             return_exceptions=True,
         )
+        baseline_times = [
+            b.response_time_ms for b in results.values()
+            if b.response_time_ms < 9999
+        ]
+        if len(baseline_times) >= 3:
+            mean_time = statistics.mean(baseline_times)
+            stdev_time = statistics.stdev(baseline_times)
+            self._time_threshold = max(mean_time + (3 * stdev_time), 3000.0)
+        else:
+            self._time_threshold = 4000.0
         return results
 
     async def _capture_baseline(
         self, point: InjectionPoint, session: aiohttp.ClientSession
     ) -> Baseline:
         """Send a known-benign probe and record the normal response profile."""
-        benign_value = "guardian_baseline_probe_1234"
+        benign_value = ProbeExecutor._generate_baseline_probe(point.param_name, point.source)
         t0 = time.monotonic()
         try:
             if point.method == "POST":
@@ -471,9 +546,13 @@ class PenetrationAgent(BaseAgent):
                 if baseline is None or ind not in baseline.present_indicators:
                     new.append(ind)
 
-        # Status code deviation: 200 on a normally-403/404 endpoint
-        if baseline and baseline.status_code in (403, 404, 401):
-            if test.status_code == 200:
+        # Status code bypass refinement for auth-gated endpoints.
+        if baseline and baseline.status_code in (401, 403) and test.status_code == 200:
+            length_ratio = (test.body_length / baseline.body_length) if baseline.body_length > 0 else 0.0
+            snippet_500 = str(test.evidence.get("response_snippet", ""))[:500].lower()
+            soft_error_markers = ["access denied", "forbidden", "not found", "error", "invalid"]
+            contains_soft_error = any(marker in snippet_500 for marker in soft_error_markers)
+            if length_ratio > 1.3 or not contains_soft_error:
                 new.append(f"status_code_bypass:{baseline.status_code}→200")
 
         # Body length explosion: >50% larger than baseline (possible data dump)
@@ -482,10 +561,10 @@ class PenetrationAgent(BaseAgent):
             if ratio > 1.5:
                 new.append(f"body_length_increase:{ratio:.1f}x")
 
-        # Time-based detection: response >4s slower than baseline
+        # Time-based detection using calibrated per-target threshold.
         if baseline and baseline.response_time_ms > 0:
             time_delta = test.response_time_ms - baseline.response_time_ms
-            if time_delta > 4000:
+            if time_delta > self._time_threshold:
                 new.append(f"time_based_delay:{time_delta:.0f}ms")
 
         return new

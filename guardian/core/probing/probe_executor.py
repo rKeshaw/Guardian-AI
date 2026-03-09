@@ -7,6 +7,7 @@ import logging
 import random
 import ssl
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -86,11 +87,66 @@ class ProbeExecutor:
     async def close(self):
         await self._session.close()
 
+    @classmethod
+    def build_injection_point(cls, data: dict) -> InjectionPoint:
+        raw = data or {}
+
+        url = str(raw.get("url", "")).strip()
+        if not url:
+            raise ValueError("InjectionPoint.url is required")
+
+        param_name = str(raw.get("param_name", "")).strip()
+        if not param_name:
+            raise ValueError("InjectionPoint.param_name is required")
+
+        method = str(raw.get("method", "GET")).upper().strip() or "GET"
+        allowed_methods = {"GET", "POST", "PUT", "DELETE", "PATCH"}
+        if method not in allowed_methods:
+            logger.warning("Invalid injection point method '%s'; defaulting to GET", method)
+            method = "GET"
+
+        param_type = str(raw.get("param_type", "query")).lower().strip() or "query"
+        allowed_param_types = {"query", "form", "json", "header", "cookie"}
+        if param_type not in allowed_param_types:
+            logger.warning("Invalid injection point param_type '%s'; defaulting to query", param_type)
+            param_type = "query"
+
+        other_params = raw.get("other_params", {})
+        if not isinstance(other_params, dict):
+            other_params = {}
+
+        return InjectionPoint(
+            url=url,
+            method=method,
+            param_name=param_name,
+            param_type=param_type,
+            context_hint=str(raw.get("context_hint", "")),
+            other_params=other_params,
+        )
+
+
+    @staticmethod
+    def _generate_baseline_probe(param_name: str, param_type: str) -> str:
+        rand = uuid.uuid4().hex[:8]
+        safe_rand = ''.join(ch for ch in rand if ch.isalnum())
+
+        if param_type == "header":
+            quality_digit = next((ch for ch in safe_rand if ch.isdigit()), "9")
+            return f"en-US,en;q=0.{quality_digit}"
+
+        if param_type in {"form", "json"}:
+            digits = ''.join(ch for ch in safe_rand if ch.isdigit())[:4].ljust(4, "0")
+            return f"John{digits}"
+
+        # Default query/cookie style: 8-12 safe alphanumeric chars
+        return safe_rand[:10]
+
     async def capture_baseline(self, point: InjectionPoint) -> ProbeResult:
         cache_key = f"{point.method}:{point.url}:{point.param_name}"
         if cache_key in self._baseline_cache:
             return self._baseline_cache[cache_key]
-        result = await self.fire(point, "guardian_baseline_probe_8675309")
+        benign_value = self._generate_baseline_probe(point.param_name, point.param_type)
+        result = await self.fire(point, benign_value)
         self._baseline_cache[cache_key] = result
         return result
 

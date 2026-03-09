@@ -188,6 +188,8 @@ async def test_compression_triggered_at_threshold(monkeypatch):
             self.explore = AsyncMock(return_value=None)
 
     monkeypatch.setattr("guardian.core.intelligence.reasoning_agent.ReasoningAgent", FakeReasoningAgent)
+    monkeypatch.setattr("guardian.core.graph.graph_orchestrator.settings.MAX_GRAPH_TOKENS", 20000, raising=False)
+    monkeypatch.setattr("guardian.core.graph.graph_orchestrator.settings.GRAPH_COMPRESS_THRESHOLD", 0.8, raising=False)
 
     graph = AttackGraph()
     for i in range(12):
@@ -242,3 +244,28 @@ async def test_graph_persisted_after_exploration(monkeypatch):
 
     assert db.upsert_node.call_count >= 1
     assert db.upsert_graph_meta.call_count >= 1
+
+def test_select_next_uses_priority_queue_when_frontier_large():
+    orchestrator = GraphOrchestrator(ai_client=SimpleNamespace(), comprehender=SimpleNamespace(), db=DummyDB())
+    graph = AttackGraph()
+
+    for i in range(55):
+        graph.add_node(_hypothesis_node(f"hq-{i}", confidence=0.5 + ((i % 10) * 0.01), impact=5 + (i % 5)))
+
+    selected = orchestrator._select_next(graph)
+
+    assert selected is not None
+    assert orchestrator._priority_queue is not None
+
+
+def test_select_next_small_frontier_does_not_create_priority_queue():
+    orchestrator = GraphOrchestrator(ai_client=SimpleNamespace(), comprehender=SimpleNamespace(), db=DummyDB())
+    graph = AttackGraph()
+
+    for i in range(10):
+        graph.add_node(_hypothesis_node(f"sq-{i}"))
+
+    selected = orchestrator._select_next(graph)
+
+    assert selected is not None
+    assert orchestrator._priority_queue is None

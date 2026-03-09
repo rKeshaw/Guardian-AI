@@ -129,6 +129,24 @@ class ReportingAgent:
             if isinstance(payload, dict):
                 payload.setdefault("cvss_vector", vector)
                 payload.setdefault("cvss_score", score)
+                http_conf = finding.data.get("http_confirmation") if isinstance(finding.data, dict) else None
+                if isinstance(http_conf, dict):
+                    payload["http_confirmation"] = {
+                        "confirmed": bool(http_conf.get("http_confirmed", False)),
+                        "indicators": http_conf.get("new_indicators", []),
+                        "impact_level": http_conf.get("impact_level", "None"),
+                    }
+
+                    if http_conf.get("http_confirmed"):
+                        payload["proof_of_concept"] = (
+                            str(payload.get("proof_of_concept", "")).strip()
+                            + "\n\nHTTP confirmation: Targeted replay of exploitation payload produced differential indicators."
+                        ).strip()
+                    elif finding.data.get("exploitation_evidence"):
+                        payload["proof_of_concept"] = (
+                            str(payload.get("proof_of_concept", "")).strip()
+                            + "\n\nNote: LLM reasoning confirmed this finding, but active HTTP replay did not reproduce differential indicators."
+                        ).strip()
                 out.append(payload)
             else:
                 out.append(self._technical_fallback(finding, chain, vector, score))
@@ -149,6 +167,11 @@ class ReportingAgent:
             "description": finding.data.get("hypothesis", ""),
             "proof_of_concept": poc,
             "remediation": "Validate and sanitize inputs, apply least privilege, and patch affected components.",
+            "http_confirmation": {
+                "confirmed": bool((finding.data.get("http_confirmation") or {}).get("http_confirmed", False)),
+                "indicators": (finding.data.get("http_confirmation") or {}).get("new_indicators", []),
+                "impact_level": (finding.data.get("http_confirmation") or {}).get("impact_level", "None"),
+            },
         }
 
     def _executive_fallback(self, ctx: dict[str, Any]) -> dict[str, Any]:

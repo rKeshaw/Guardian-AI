@@ -139,3 +139,24 @@ def test_new_content_only_additions():
 
     assert "NEWLINE" in profile.new_content
     assert "line1" not in profile.new_content
+
+def test_to_prompt_dict_sets_time_anomaly_true_for_large_delta():
+    analyzer = ResponseAnalyzer()
+    baseline = ProbeResult(status_code=200, body="ok", response_time_ms=100)
+    current = ProbeResult(status_code=200, body="ok", response_time_ms=5100)
+
+    profile = analyzer.analyze(current, baseline)
+    prompt = profile.to_prompt_dict()
+
+    assert prompt["time_anomaly"] is True
+
+
+def test_to_prompt_dict_sets_time_anomaly_false_for_small_delta():
+    analyzer = ResponseAnalyzer()
+    baseline = ProbeResult(status_code=200, body="ok", response_time_ms=100)
+    current = ProbeResult(status_code=200, body="ok", response_time_ms=600)
+
+    profile = analyzer.analyze(current, baseline)
+    prompt = profile.to_prompt_dict()
+
+    assert prompt["time_anomaly"] is False

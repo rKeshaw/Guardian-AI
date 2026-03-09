@@ -12,12 +12,18 @@ from guardian.core.token_ledger import TokenLedger
 
 logger = logging.getLogger(__name__)
 
+def _score_node(node: Node) -> float:
+    impact = float(node.data.get("owasp_impact", 5)) / 10.0
+    depth_decay = 1.0 / (1.0 + node.depth * 0.15)
+    confidence = float(node.confidence)
+    return confidence * 0.45 + impact * 0.40 + depth_decay * 0.15
 
 class GraphOrchestrator:
     def __init__(self, ai_client, comprehender, db) -> None:
         self.ai_client = ai_client
         self.comprehender = comprehender
         self.db = db
+        self._priority_queue: HypothesisPriorityQueue | None = None
 
     async def run(
         self,
@@ -34,10 +40,11 @@ class GraphOrchestrator:
         reasoning_agent = ReasoningAgent(self.ai_client, self.comprehender, probe_executor, ledger)
 
         persisted_ids: set[str] = set()
+        self._priority_queue = None
 
         while graph.frontier and not ledger.is_critical():
-            max_graph_tokens = int(getattr(settings, "MAX_GRAPH_TOKENS", 20000))
-            compress_threshold = float(getattr(settings, "GRAPH_COMPRESS_THRESHOLD", 0.8))
+            max_graph_tokens = int(settings.MAX_GRAPH_TOKENS)
+            compress_threshold = float(settings.GRAPH_COMPRESS_THRESHOLD)
             threshold_tokens = max_graph_tokens * compress_threshold
             if graph.token_cost() > threshold_tokens:
                 await self._compress_graph(graph, ledger)
@@ -56,13 +63,22 @@ class GraphOrchestrator:
             await self.db.upsert_node(graph.graph_id, hypothesis_node.to_dict())
             persisted_ids.add(hypothesis_node.id)
 
+            remaining = ledger.remaining()
+            score = _score_node(hypothesis_node)
+            cap = int(remaining * 0.20)
+            allocated = max(2000, min(int(remaining * 0.20 * score), cap if cap > 0 else 0))
+            hypothesis_budget = ledger.allocate_sub_budget(allocated, "hypothesis_exploration")
+
+            reasoning_agent.ledger = hypothesis_budget
             finding = await reasoning_agent.explore(hypothesis_node, target_model, graph)
+            hypothesis_budget.release()
 
             if finding is not None:
                 try:
                     graph.resolve_hypothesis(hypothesis_node.id, NodeType.FINDING)
                 except Exception:
                     pass
+                persisted_ids.discard(hypothesis_node.id)
                 await self._expand_from_finding(
                     finding=finding,
                     graph=graph,
@@ -70,6 +86,7 @@ class GraphOrchestrator:
                     ledger=ledger,
                     hypothesis_agent=hypothesis_agent,
                 )
+                persisted_ids.discard(finding.id)
                 await self.db.upsert_node(graph.graph_id, finding.to_dict())
                 persisted_ids.add(finding.id)
             elif hypothesis_node.id in graph.frontier:
@@ -78,6 +95,7 @@ class GraphOrchestrator:
                     graph.resolve_hypothesis(hypothesis_node.id, NodeType.DEAD_END)
                 except Exception:
                     pass
+                persisted_ids.discard(hypothesis_node.id)
 
             for node_id, node in graph.nodes.items():
                 if node_id not in persisted_ids:
@@ -99,18 +117,33 @@ class GraphOrchestrator:
                     "frontier_size": len(graph.frontier),
                 },
             )
-
+        logger.debug("Token budget: %s", ledger.render_breakdown())
         return graph
 
     def _select_next(self, graph: AttackGraph) -> Node | None:
-        # Replace max() with HypothesisPriorityQueue when frontier exceeds 50 nodes.
-        def _score(node: Node) -> float:
-            impact = float(node.data.get("owasp_impact", 5)) / 10.0
-            depth_decay = 1.0 / (1.0 + node.depth * 0.15)
-            confidence = float(node.confidence)
-            return confidence * 0.45 + impact * 0.40 + depth_decay * 0.15
+        active = graph.get_active_hypotheses()
+        if not active:
+            return None
 
-        return max(graph.get_active_hypotheses(), key=_score, default=None)
+        queue_threshold = 50
+        if len(active) >= queue_threshold:
+            if self._priority_queue is None:
+                self._priority_queue = HypothesisPriorityQueue(active)
+            else:
+                existing_ids = self._priority_queue._ids
+                for node in active:
+                    if node.id not in existing_ids:
+                        self._priority_queue.push(node)
+
+            active_ids = {node.id for node in active}
+            while True:
+                candidate = self._priority_queue.pop()
+                if candidate is None:
+                    return None
+                if candidate.id in active_ids:
+                    return candidate
+
+        return max(active, key=_score_node)
 
     async def _expand_from_finding(
         self,
@@ -138,7 +171,7 @@ class GraphOrchestrator:
         if not self._charge(ledger, "graph_expansion", prompt):
             return
 
-        persona = getattr(AIPersona, "HYPOTHESIS_ENGINE", AIPersona.VULNERABILITY_EXPERT)
+        persona = AIPersona.HYPOTHESIS_ENGINE
         raw = await self.ai_client.query_with_retry(prompt, persona=persona)
         payload = self._unpack_query_result(raw)
         if not isinstance(payload, dict):
@@ -166,8 +199,8 @@ class GraphOrchestrator:
             logger.info("Spawned new hypothesis from finding finding_id=%s hypothesis=%s", finding.id, node.content)
 
     async def _compress_graph(self, graph: AttackGraph, ledger: TokenLedger) -> None:
-        max_graph_tokens = int(getattr(settings, "MAX_GRAPH_TOKENS", 20000))
-        compress_threshold = float(getattr(settings, "GRAPH_COMPRESS_THRESHOLD", 0.8))
+        max_graph_tokens = int(settings.MAX_GRAPH_TOKENS)
+        compress_threshold = float(settings.GRAPH_COMPRESS_THRESHOLD)
         threshold_tokens = max_graph_tokens * compress_threshold
         target_cost = threshold_tokens * 0.5
 

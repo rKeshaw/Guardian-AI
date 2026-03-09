@@ -34,10 +34,11 @@ def _valid_hypothesis(confidence: int = 72, text: str = "SQLi hypothesis") -> di
 
 def _minimal_target_model() -> dict:
     return {
-        "technologies": ["nginx", "php", "mysql"],
-        "injection_points": [{"url": "https://target.com/search", "param_name": "q", "method": "GET"}],
+        "technologies": ["nginx", "mysql"],
+        "injection_points": [{"url": "https://target.com/search", "param_name": "q", "method": "GET", "param_type": "query"}],
         "interesting_signals": ["x-powered-by: php"],
         "waf": "modsecurity",
+        "url": "https://target.com",
     }
 
 
@@ -152,3 +153,69 @@ async def test_nodes_sorted_by_confidence_descending():
     nodes = await agent.generate(_minimal_target_model(), AttackGraph(), TokenLedger(total=10000))
 
     assert [n.confidence for n in nodes] == [0.90, 0.60, 0.40]
+
+def test_get_technology_hypotheses_returns_wordpress_templates():
+    agent = HypothesisAgent(db=None, ai_client=SimpleNamespace())
+
+    injection_points = [
+        {
+            "url": "http://t.com/",
+            "method": "GET",
+            "param_name": "id",
+            "param_type": "query",
+            "context_hint": "",
+            "other_params": {},
+        }
+    ]
+    tech_hyps = agent._get_technology_hypotheses(
+        {"technologies": ["wordpress"], "url": "http://t.com"},
+        injection_points,
+    )
+
+    assert len(tech_hyps) > 0
+
+
+@pytest.mark.anyio
+async def test_generate_includes_wordpress_seeded_hypothesis():
+    ai_client = SimpleNamespace()
+    ai_client.query_with_retry = AsyncMock(
+        side_effect=[
+            ({"hypotheses": [_valid_hypothesis()]}, None),
+            ({"missing": [], "redundant": []}, None),
+        ]
+    )
+    agent = HypothesisAgent(db=None, ai_client=ai_client)
+
+    target_model = _minimal_target_model()
+    target_model["technologies"] = ["wordpress", "php"]
+
+    nodes = await agent.generate(target_model, AttackGraph(), TokenLedger(total=10000))
+
+    assert any(
+        ("wordpress" in n.content.lower())
+        or ("xmlrpc" in n.content.lower())
+        or ("wp-" in n.content.lower())
+        for n in nodes
+    )
+
+
+def test_technology_seeded_hypotheses_pass_validation():
+    agent = HypothesisAgent(db=None, ai_client=SimpleNamespace())
+    injection_points = [
+        {
+            "url": "http://t.com/",
+            "method": "GET",
+            "param_name": "id",
+            "param_type": "query",
+            "context_hint": "",
+            "other_params": {},
+        }
+    ]
+
+    seeded = agent._get_technology_hypotheses(
+        {"technologies": ["wordpress"], "url": "http://t.com"},
+        injection_points,
+    )
+    validated = agent._validate_hypotheses(seeded)
+
+    assert len(validated) > 0

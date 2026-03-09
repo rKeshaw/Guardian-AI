@@ -147,6 +147,44 @@ async def test_port_scan_failure_returns_empty(monkeypatch):
 
     assert model.open_ports == []
 
+@pytest.mark.anyio
+async def test_port_scan_uses_hostname_without_port(monkeypatch):
+    url = "https://example.com:8080"
+    routes = _base_routes(url)
+
+    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
+    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
+
+    captured = {"cmd": None}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("guardian.agents.reconnaissance_agent.subprocess.run", fake_run)
+
+    agent = ReconnaissanceAgent(db=None)
+    await agent.run([url], {"crawl_depth": 0})
+
+    assert captured["cmd"] is not None
+    assert "example.com" in captured["cmd"]
+    assert "example.com:8080" not in captured["cmd"]
+
+
+@pytest.mark.anyio
+async def test_behavioral_waf_detected_on_403_probe(monkeypatch):
+    url = "https://example.com"
+    routes = _base_routes(url)
+    routes[("GET", f"{url}?guardian_waf_probe=<script>alert(1)</script>")] = FakeResponse(status=403, headers={}, body="forbidden")
+    routes[("GET", f"{url}/?guardian_waf_probe=<script>alert(1)</script>")] = FakeResponse(status=403, headers={}, body="forbidden")
+
+    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
+    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
+
+    agent = ReconnaissanceAgent(db=None)
+    model = await agent.run([url], {"crawl_depth": 0})
+
+    assert model.waf_detected == "behavioral_waf_detected"
 
 def test_to_hypothesis_context_token_limit():
     model = TargetModel(
@@ -171,7 +209,29 @@ def test_to_hypothesis_context_token_limit():
     ctx = model.to_hypothesis_context()
     assert estimate_tokens(json.dumps(ctx)) < 2000
 
+def test_to_hypothesis_context_token_limit_with_only_long_url_and_empty_lists():
+    model = TargetModel(
+        url="https://" + ("a" * 10000) + ".example.com",
+        domain="example.com",
+        technologies=[],
+        waf_detected="x" * 500,
+        backend_language="python",
+        database_hint="mysql",
+        framework="fastapi",
+        injection_points=[],
+        forms=[],
+        api_endpoints=[],
+        html_comments=[],
+        hardcoded_values=[],
+        interesting_paths=[],
+        open_ports=[],
+        attack_surface_signals=[],
+        page_classifications={},
+    )
 
+    ctx = model.to_hypothesis_context()
+    assert estimate_tokens(json.dumps(ctx)) < 2000
+    
 @pytest.mark.anyio
 async def test_js_fetch_endpoint_extracted(monkeypatch):
     url = "https://example.com"

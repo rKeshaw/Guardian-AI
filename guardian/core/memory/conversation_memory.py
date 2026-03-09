@@ -4,11 +4,12 @@ from dataclasses import dataclass, field
 from statistics import mean
 from typing import Any
 
+from guardian.core.config import settings
+
 
 @dataclass
 class ConversationMemory:
     seed_hypothesis: str = ""
-    _WORKING_MEMORY_LIMIT: int = 4
     _working: list[dict[str, Any]] = field(default_factory=list)
     _episodes: list[Any] = field(default_factory=list)
     confirmed_facts: set[str] = field(default_factory=set)
@@ -21,6 +22,10 @@ class ConversationMemory:
     @property
     def turn_count(self) -> int:
         return len(self._working) + len(self._episodes)
+    
+    @property
+    def _WORKING_MEMORY_LIMIT(self) -> int:
+        return int(settings.WORKING_MEMORY_LIMIT)
 
     @property
     def recent_confidences(self) -> list[float]:

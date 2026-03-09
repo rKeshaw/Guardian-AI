@@ -6,11 +6,13 @@ import logging
 import re
 import ssl
 import subprocess
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
 
+import dns.resolver
 import aiohttp
 from bs4 import BeautifulSoup, Comment
 
@@ -81,12 +83,14 @@ class ReconnaissanceAgent:
             crawl_task = self._crawl_and_extract(target_url, session, depth)
             common_task = self._check_common_paths(target_url, session)
             port_task = self._port_scan(parsed.netloc)
+            subdomain_task = self._enumerate_subdomains(parsed.netloc)
 
-            fingerprint, crawled, common_paths, open_ports = await asyncio.gather(
+            fingerprint, crawled, common_paths, open_ports, subdomains = await asyncio.gather(
                 fp_task,
                 crawl_task,
                 common_task,
                 port_task,
+                subdomain_task,
             )
 
             js_analysis = await self._fetch_and_analyze_javascript(
@@ -138,6 +142,12 @@ class ReconnaissanceAgent:
             hardcoded_values=js_analysis.get("hardcoded_secrets", []),
             interesting_paths=sorted(common_paths.get("found_paths", {}).keys()),
             open_ports=open_ports,
+            subdomains=subdomains,
+            subdomain_takeover_risk=(
+                "High Risk" if any(sd.get("takeover_risk") for sd in subdomains)
+                else "Medium Risk" if len(subdomains) > 3
+                else "Low Risk"
+            ),
             attack_surface_signals=attack_surface_signals,
             page_classifications=crawled.get("page_classifications", {}),
         )
@@ -182,6 +192,37 @@ class ReconnaissanceAgent:
                         body_technologies.append(tech)
         except Exception as exc:
             logger.warning("Technology fingerprint failed for %s: %s", url, exc)
+
+        if not waf_detected:
+            try:
+                probe_url = f"{url}?guardian_waf_probe=<script>alert(1)</script>"
+                async with session.get(probe_url) as resp:
+                    probe_body = (await resp.text(errors="replace")).lower()
+                    location = (resp.headers.get("Location") or resp.headers.get("location") or "").lower()
+
+                    if resp.status in (403, 406):
+                        waf_detected = "behavioral_waf_detected"
+                        logger.info("Behavioral WAF detected via status probe for %s", url)
+                    elif any(
+                        key in probe_body
+                        for key in [
+                            "blocked",
+                            "forbidden",
+                            "security",
+                            "firewall",
+                            "protection",
+                            "access denied",
+                            "request rejected",
+                            "mod_security",
+                        ]
+                    ):
+                        waf_detected = "behavioral_waf_detected"
+                        logger.info("Behavioral WAF detected via response-body probe for %s", url)
+                    elif resp.status == 302 and any(key in location for key in ["captcha", "challenge"]):
+                        waf_detected = "captcha_waf_detected"
+                        logger.info("Behavioral WAF challenge detected for %s", url)
+            except Exception as exc:
+                logger.debug("Behavioral WAF probe failed for %s: %s", url, exc)
 
         return {
             "headers": headers_out,
@@ -302,6 +343,14 @@ class ReconnaissanceAgent:
         common = [
             "/.git/HEAD", "/api/swagger.json", "/api/openapi.json", "/swagger.json", "/openapi.json",
             "/api/docs", "/robots.txt", "/sitemap.xml", "/.env", "/config.json", "/api/graphql", "/graphql",
+            "/actuator/env", "/actuator/health", "/actuator/mappings",
+            "/.env.local", "/.env.backup", "/.git/config",
+            "/wp-admin/", "/wp-login.php", "/phpmyadmin/",
+            "/server-status", "/server-info",
+            "/api/v2/", "/api/v1/", "/api/",
+            "/admin/", "/administrator/",
+            "/.well-known/security.txt",
+            "/backup.zip", "/backup.sql", "/dump.sql",
         ]
         found_paths: dict[str, int] = {}
         openapi_endpoints: set[str] = set()
@@ -310,11 +359,25 @@ class ReconnaissanceAgent:
         for path in common:
             full = urljoin(url, path)
             status = None
+            needs_get_fallback = False
             try:
                 async with session.head(full) as resp:
                     status = resp.status
+                if status == 404:
+                    needs_get_fallback = False
+                elif status == 200:
+                    needs_get_fallback = False
+                else:
+                    needs_get_fallback = True
             except Exception:
-                continue
+                needs_get_fallback = True
+
+            if needs_get_fallback:
+                try:
+                    async with session.get(full) as resp:
+                        status = resp.status
+                except Exception:
+                    status = None
 
             if status == 200:
                 found_paths[path] = status
@@ -352,9 +415,27 @@ class ReconnaissanceAgent:
     async def _port_scan(self, domain: str) -> list[dict]:
         loop = asyncio.get_running_loop()
 
+        def _normalize_host(raw_domain: str) -> tuple[str, bool]:
+            target = raw_domain.strip()
+            if target.startswith("["):
+                closing = target.find("]")
+                host = target[1:closing] if closing != -1 else target.strip("[]")
+            elif target.count(":") == 1:
+                host = target.split(":", 1)[0]
+            else:
+                host = target
+
+            is_ipv6 = ":" in host and not host.startswith("[")
+            nmap_target = f"[{host}]" if is_ipv6 else host
+            return nmap_target, is_ipv6
+
         def _run_scan() -> list[dict]:
             try:
-                cmd = ["nmap", "-F", "-T4", "--open", domain]
+                host_target, is_ipv6 = _normalize_host(domain)
+                cmd = ["nmap", "-F", "-T4", "--open"]
+                if is_ipv6:
+                    cmd.append("-6")
+                cmd.append(host_target)
                 proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 if proc.returncode != 0:
                     raise RuntimeError(proc.stderr.strip() or "nmap failed")
@@ -375,6 +456,70 @@ class ReconnaissanceAgent:
                 return []
 
         return await loop.run_in_executor(_NMAP_POOL, _run_scan)
+    
+    async def _enumerate_subdomains(self, domain: str) -> list[dict]:
+        try:
+            base_domain = domain.strip()
+            if base_domain.startswith("["):
+                return []
+            if base_domain.count(":") == 1:
+                base_domain = base_domain.split(":", 1)[0]
+
+            wordlist_path = Path(__file__).resolve().parent.parent / "data" / "subdomain_wordlist.txt"
+            if not wordlist_path.exists():
+                return []
+
+            words: list[str] = []
+            for line in wordlist_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                words.append(stripped)
+                if len(words) >= 200:
+                    break
+
+            semaphore = asyncio.Semaphore(20)
+            resolver = dns.resolver.Resolver(configure=True)
+
+            async def _resolve_candidate(word: str) -> dict[str, Any] | None:
+                candidate = f"{word}.{base_domain}"
+                async with semaphore:
+                    try:
+                        a_answers = await asyncio.to_thread(resolver.resolve, candidate, "A", lifetime=2)
+                    except Exception:
+                        return None
+
+                    ip = str(a_answers[0]) if len(a_answers) else ""
+                    if not ip:
+                        return None
+
+                    takeover_risk = False
+                    try:
+                        cname_answers = await asyncio.to_thread(resolver.resolve, candidate, "CNAME", lifetime=2)
+                        if len(cname_answers):
+                            cname_target = str(cname_answers[0]).rstrip(".").lower()
+                            risky = ["github.io", "amazonaws.com", "azurewebsites.net", "herokuapp.com", "fastly.net", "shopify.com"]
+                            if any(r in cname_target for r in risky):
+                                cname_resolves = True
+                                try:
+                                    await asyncio.to_thread(resolver.resolve, cname_target, "A", lifetime=2)
+                                except Exception:
+                                    cname_resolves = False
+                                takeover_risk = not cname_resolves
+                    except Exception:
+                        pass
+
+                    result = {"subdomain": candidate, "ip": ip}
+                    if takeover_risk:
+                        result["takeover_risk"] = True
+                    return result
+
+            resolved = await asyncio.gather(*[_resolve_candidate(w) for w in words], return_exceptions=True)
+            out = [r for r in resolved if isinstance(r, dict)]
+            return out
+        except Exception as exc:
+            logger.debug("Subdomain enumeration failed for %s: %s", domain, exc)
+            return []
 
     def _extract_forms(self, soup: BeautifulSoup, base_url: str) -> list[dict]:
         out: list[dict] = []

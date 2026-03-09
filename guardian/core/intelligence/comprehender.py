@@ -123,6 +123,43 @@ class Comprehender:
         decoded = unquote(probe or "")
         lowered = decoded.lower()
         lowered = re.sub(r"\s+", " ", lowered).strip()
+
+        # Canonicalize path traversal encodings and separators
+        lowered = lowered.replace("%2e", ".").replace("%2f", "/").replace("%5c", "\\")
+        lowered = lowered.replace("..\\", "../")
+        lowered = lowered.replace("..%2f", "../")
+        lowered = lowered.replace("%2e%2e/", "../")
+        def _collapse_traversal(match: re.Match) -> str:
+            _ = match.group(0)
+            return "[N]../"
+
+        lowered = re.sub(r"(?:\.\./|\.\.\\)+", _collapse_traversal, lowered)
+
+        # SQLi boolean-based canonicalization
+        lowered = re.sub(
+            r"'\s*or\s*\d+\s*=\s*\d+\s*(?:--|#)?",
+            "' or n=n--",
+            lowered,
+            flags=re.IGNORECASE,
+        )
+
+        # SQLi union select canonicalization by removing variable column count
+        lowered = re.sub(
+            r"union\s+select\s+[\d\s,]+",
+            "union select ?",
+            lowered,
+            flags=re.IGNORECASE,
+        )
+
+        # XSS canonicalization by vector type
+        if re.search(r"<\s*script\b[\s\S]*?<\s*/\s*script\s*>", lowered, flags=re.IGNORECASE):
+            lowered = "xss_script_tag"
+        elif re.search(r"<\s*img\b[^>]*onerror\s*=", lowered, flags=re.IGNORECASE):
+            lowered = "xss_img_tag"
+        elif "javascript:" in lowered:
+            lowered = "xss_javascript_uri"
+
+        lowered = re.sub(r"\s+", " ", lowered).strip()
         return lowered
 
 # Module-level singleton

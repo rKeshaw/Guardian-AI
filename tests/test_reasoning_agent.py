@@ -13,6 +13,7 @@ from guardian.core.graph.attack_graph import AttackGraph, Node, NodeType
 from guardian.core.intelligence.reasoning_agent import ReasoningAgent
 from guardian.core.memory.semantic_unit import SemanticUnit
 from guardian.core.token_ledger import TokenLedger
+from guardian.core.probing.probe_executor import InjectionPoint
 
 
 @dataclass
@@ -251,3 +252,37 @@ async def test_budget_exhaustion_terminates_loop():
 
     assert out is None
     assert ai_client.query_with_retry.call_count == 0
+
+def test_build_injection_point_valid_dict_returns_injection_point():
+    agent = ReasoningAgent(SimpleNamespace(), _make_comprehender(), ProbeExecutorRuntimeDouble(), TokenLedger(total=100000))
+
+    point = agent._build_injection_point({
+        "url": "https://example.com/search",
+        "method": "get",
+        "param_name": "q",
+        "param_type": "query",
+        "context_hint": "search",
+        "other_params": {},
+    })
+
+    assert isinstance(point, InjectionPoint)
+    assert point.method == "GET"
+    assert point.param_type == "query"
+
+
+def test_build_injection_point_missing_required_fields_returns_none():
+    agent = ReasoningAgent(SimpleNamespace(), _make_comprehender(), ProbeExecutorRuntimeDouble(), TokenLedger(total=100000))
+
+    missing_url = agent._build_injection_point({
+        "method": "GET",
+        "param_name": "q",
+        "param_type": "query",
+    })
+    missing_param = agent._build_injection_point({
+        "url": "https://example.com/search",
+        "method": "GET",
+        "param_type": "query",
+    })
+
+    assert missing_url is None
+    assert missing_param is None

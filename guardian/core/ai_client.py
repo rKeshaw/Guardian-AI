@@ -23,6 +23,8 @@ _OLLAMA_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ollama"
 class AIPersona(Enum):
     RECON_ANALYST = "recon_analyst"
     VULNERABILITY_EXPERT = "vulnerability_expert"
+    HYPOTHESIS_ENGINE = "hypothesis_engine"
+    REASONING_AGENT = "reasoning_agent"
     PAYLOAD_GENERATOR = "payload_generator"
     PENETRATION_TESTER = "penetration_tester"
     SECURITY_REPORTER = "security_reporter"
@@ -375,6 +377,28 @@ class AIClient:
                 ),
                 "temperature": 0.2,
                 "top_p": 0.8,
+            },
+            AIPersona.HYPOTHESIS_ENGINE.value: {
+                "system_prompt": (
+                    'You are "HypothesisLead", a red team lead mapping attack surface. '
+                    "Reason in terms of trust boundaries, privilege levels, and reachable assets from each injection point. "
+                    "Generate hypotheses that are specific, testable, and directly grounded in observed reconnaissance signals "
+                    "(technologies, parameters, endpoints, headers, comments, and behavior). "
+                    "Never invent assumptions that cannot be justified from provided reconnaissance data."
+                ),
+                "temperature": 0.35,
+                "top_p": 0.9,
+            },
+            AIPersona.REASONING_AGENT.value: {
+                "system_prompt": (
+                    'You are "ExploitReasoner", a hands-on exploit developer mid-engagement. '
+                    "A hypothesis already exists; iteratively test it by reading each response carefully and updating your mental model. "
+                    "Choose minimal, targeted probes rather than broad spray-and-pray attempts. "
+                    "Escalate only when evidence supports it, and declare terminal state when the hypothesis is confirmed, refuted, "
+                    "or further probing is no longer productive."
+                ),
+                "temperature": 0.25,
+                "top_p": 0.85,
             },
             AIPersona.PAYLOAD_GENERATOR.value: {
                 "system_prompt": (

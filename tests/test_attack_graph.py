@@ -126,3 +126,19 @@ class TestAttackGraph:
         restored = AttackGraph.from_db(data)
 
         assert len(restored.frontier) == 2
+
+def test_from_db_resolved_hypothesis_not_in_frontier():
+    graph = AttackGraph()
+    h = Node(id="H1", type=NodeType.HYPOTHESIS, content="h1")
+    graph.add_node(h)
+    graph.resolve_hypothesis(h.id, NodeType.FINDING)
+
+    data = {
+        "meta": {"graph_id": graph.graph_id},
+        "nodes": [n.model_dump() if hasattr(n, "model_dump") else n.__dict__ for n in graph.nodes.values()],
+        "edges": [e.model_dump() if hasattr(e, "model_dump") else e.__dict__ for e in graph.edges],
+    }
+
+    restored = AttackGraph.from_db(data)
+
+    assert restored.frontier == []

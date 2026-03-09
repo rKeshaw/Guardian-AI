@@ -3,6 +3,7 @@ guardian/core/config.py
 """
 
 import os
+import logging
 from pathlib import Path
 from typing import List, Optional
 
@@ -14,17 +15,43 @@ _HERE = Path(__file__).resolve().parent
 # Project root: two levels up from guardian/core/
 _PROJECT_ROOT = _HERE.parent.parent
 
+logger = logging.getLogger(__name__)
 
 class Settings(BaseSettings):
     # ── Database ──────────────────────────────
     DATABASE_URL: str = "sqlite:///./data/guardian.db"
 
-    # ── Redis ─────────────────────────────────
-    REDIS_URL: str = "redis://redis:6379"
-
     # ── AI / Ollama ───────────────────────────
     OLLAMA_BASE_URL: str = "http://ollama:11434"
     DEFAULT_MODEL: str = "mixtral:latest"
+    # Backward-compatibility alias for existing deployments using OLLAMA_MODEL.
+    # If set, resolve_paths() maps it to DEFAULT_MODEL.
+    OLLAMA_MODEL: str | None = None
+    OLLAMA_MODEL_FAST: str = "llama3:latest"
+
+    # ── Pipeline / graph / reasoning controls ─
+    MAX_GRAPH_TOKENS: int = 50000
+    GRAPH_COMPRESS_THRESHOLD: float = 0.8
+    MAX_TURNS_PER_HYPOTHESIS: int = 6
+
+    # ── Probe execution pacing ────────────────
+    PROBE_DELAY_MIN: float = 0.5
+    PROBE_DELAY_MAX: float = 1.5
+
+    # ── Memory controls ───────────────────────
+    WORKING_MEMORY_LIMIT: int = 4
+
+    # ── Integration Feature Flags ─────────────
+    # Tier 2 integrations are opt-in and default OFF to preserve current behavior.
+    ENABLE_VULN_ANALYSIS_SEEDING: bool = False
+    ENABLE_RAG_PROBING: bool = False
+    ENABLE_ACTIVE_CONFIRMATION: bool = False
+
+    # ── Reserved / currently unused — planned for future features ─
+    # Kept for backward compatibility with existing deployments/.env files.
+
+    # ── Redis ─────────────────────────────────
+    REDIS_URL: str = "redis://redis:6379"
 
     # ── API ───────────────────────────────────
     API_V1_STR: str = "/api/v1"
@@ -100,6 +127,11 @@ class Settings(BaseSettings):
                 ca = _PROJECT_ROOT / ca
             self.CA_BUNDLE_PATH = str(ca)
 
+        # Backward compatibility: accept legacy OLLAMA_MODEL env var and
+        # map it to DEFAULT_MODEL used by AIClient.
+        if self.OLLAMA_MODEL:
+            self.DEFAULT_MODEL = self.OLLAMA_MODEL
+
         return self
 
     def get_db_path(self) -> str:
@@ -135,6 +167,19 @@ class Settings(BaseSettings):
                 "SSL verification is disabled (VERIFY_SSL=False). "
                 "Reconnaissance traffic is vulnerable to MITM attacks."
             )
+
+        if self.PROBE_DELAY_MIN >= self.PROBE_DELAY_MAX:
+            warnings.append(
+                "Probe delay configuration is invalid: "
+                "PROBE_DELAY_MIN must be less than PROBE_DELAY_MAX."
+            )
+
+        if self.ENABLE_VULN_ANALYSIS_SEEDING:
+            logger.info("Integration feature flag enabled: ENABLE_VULN_ANALYSIS_SEEDING")
+        if self.ENABLE_RAG_PROBING:
+            logger.info("Integration feature flag enabled: ENABLE_RAG_PROBING")
+        if self.ENABLE_ACTIVE_CONFIRMATION:
+            logger.info("Integration feature flag enabled: ENABLE_ACTIVE_CONFIRMATION")
 
         db_dir = Path(self.get_db_path()).parent
         if not os.access(db_dir, os.W_OK):

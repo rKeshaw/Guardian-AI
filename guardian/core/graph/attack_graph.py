@@ -196,6 +196,11 @@ class AttackGraph:
         meta = data.get("meta", {}) if isinstance(data, dict) else {}
         graph = cls(graph_id=meta.get("graph_id", str(uuid4())))
 
+        # Frontier is rebuilt via add_node(); correctness depends on persisted
+        # terminal node types in DB. Resolved hypotheses must be stored as
+        # FINDING/DEAD_END (not HYPOTHESIS), which keeps only unresolved
+        # hypotheses on the restored frontier.
+
         for raw in data.get("nodes", []):
             node = Node(
                 id=raw["id"],

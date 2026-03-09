@@ -11,6 +11,7 @@ from guardian.core.intelligence.response_analyzer import ResponseAnalyzer
 from guardian.core.intelligence.quality_monitor import QualityMonitor
 from guardian.core.memory.conversation_memory import ConversationMemory
 from guardian.core.config import settings
+from guardian.core.probing.probe_executor import ProbeExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -45,16 +46,35 @@ class ReasoningAgent:
 
         injection_point_data = hypothesis_node.data.get("injection_point", {})
         injection_point = self._build_injection_point(injection_point_data)
+        if injection_point is None:
+            logger.warning("Invalid injection point for hypothesis=%s", hypothesis_node.id)
+            return None
 
         current_probe = str(hypothesis_node.data.get("entry_probe", ""))
-        max_turns = int(getattr(settings, "MAX_TURNS_PER_HYPOTHESIS", 6))
+        max_turns = int(settings.MAX_TURNS_PER_HYPOTHESIS)
 
         baseline = await self.probe_executor.capture_baseline(injection_point)
         if getattr(baseline, "is_error", False):
             logger.warning("Baseline capture failed for hypothesis=%s", hypothesis_node.id)
             return None
 
-        persona = getattr(AIPersona, "REASONING_AGENT", AIPersona.PENETRATION_TESTER)
+        persona = AIPersona.REASONING_AGENT
+
+        rag_context = ""
+        if settings.ENABLE_RAG_PROBING:
+            from guardian.core.intelligence.rag_helper import rag_helper
+
+            rag_context = rag_helper.get_probe_context(
+                owasp_category=str(hypothesis_node.data.get("owasp_category", "")),
+                vuln_name=str(hypothesis_node.data.get("hypothesis", "")),
+                token_budget=600,
+            )
+            if rag_context and not self._charge("reasoning_agent_rag", rag_context):
+                logger.warning(
+                    "Insufficient token budget for RAG context hypothesis=%s",
+                    hypothesis_node.id,
+                )
+                rag_context = ""
 
         for turn in range(max_turns):
             if await self.comprehender.is_near_duplicate(current_probe, memory._tried_probes):
@@ -73,6 +93,7 @@ class ReasoningAgent:
                     max_turns,
                     duplicate_override,
                     self._pending_recovery_message or "",
+                    rag_context=rag_context,
                 )
 
                 if not self._charge("reasoning_agent", re_prompt):
@@ -147,6 +168,7 @@ class ReasoningAgent:
                 memory_string,
                 profile,
                 self._pending_recovery_message or "",
+                rag_context=rag_context,
             )
 
             if not self._charge("reasoning_agent", full_prompt):
@@ -162,6 +184,15 @@ class ReasoningAgent:
                 break
 
             overflow = memory.add_turn(current_probe, profile.to_prompt_dict(), observation_unit, llm_response)
+            normalize_fn = getattr(self.comprehender, "_normalize_probe", None)
+            normalized_probe = normalize_fn(current_probe) if callable(normalize_fn) else str(current_probe)
+            logger.debug(
+                "Probe diversity hypothesis=%s normalized=%r tried_count=%d semantic_normalized=%s",
+                hypothesis_node.id,
+                normalized_probe,
+                len(memory._tried_probes),
+                normalized_probe != current_probe,
+            )
             if overflow:
                 oldest = memory.oldest_working_turn()
                 if oldest is not None:
@@ -205,7 +236,17 @@ class ReasoningAgent:
         memory_string: str,
         profile,
         quality_recovery_message: str,
+        rag_context: str = "",
     ) -> str:
+        rag_section = ""
+        if rag_context:
+            rag_section = (
+                "ATTACK KNOWLEDGE CONTEXT:\n"
+                f"{rag_context}\n\n"
+                "Use the above payload patterns as inspiration for your next_probe "
+                "when appropriate. Do not copy them verbatim — adapt them to the "
+                "specific parameter and technology stack you are targeting.\n\n"
+            )
         base = f'''PENETRATION TEST — Active Reasoning Session
 Turn: {turn + 1} of {max_turns}
 
@@ -225,7 +266,7 @@ ATTACK CHAIN: {hypothesis_node.data.get("attack_chain", "initial hypothesis — 
 LATEST OBSERVATION:
 {json.dumps(profile.to_prompt_dict(), indent=2)}
 
-Respond with a JSON object containing exactly these keys:
+{rag_section}Respond with a JSON object containing exactly these keys:
 {{
   "observation": "one sentence: what this response tells you",
   "updated_hypothesis": "your current precise model of the vulnerability",
@@ -263,6 +304,7 @@ set exploitation_evidence to a dict with keys:
         max_turns: int,
         override_message: dict[str, str],
         quality_recovery_message: str,
+        rag_context: str = "",
     ) -> str:
         fake_profile = type("Profile", (), {"to_prompt_dict": lambda _self: {"error": "duplicate_probe"}})()
         prompt = self._build_prompt(
@@ -274,6 +316,7 @@ set exploitation_evidence to a dict with keys:
             memory.render_for_prompt(token_budget=3000),
             fake_profile,
             quality_recovery_message,
+            rag_context=rag_context,
         )
         return prompt + "\n\nSYSTEM OVERRIDE:\n" + json.dumps(override_message)
 
@@ -299,12 +342,12 @@ set exploitation_evidence to a dict with keys:
         graph.resolve_hypothesis(hypothesis_node.id, NodeType.FINDING)
         return finding
 
-    def _build_injection_point(self, injection_point_data: dict[str, Any]) -> Any:
-        if hasattr(self.probe_executor, "build_injection_point"):
-            return self.probe_executor.build_injection_point(injection_point_data)
-
-        probe_module = __import__("types")
-        return probe_module.SimpleNamespace(**injection_point_data)
+    def _build_injection_point(self, injection_point_data: dict[str, Any]) -> Any | None:
+        try:
+            return ProbeExecutor.build_injection_point(injection_point_data)
+        except ValueError as exc:
+            logger.error("Invalid injection point payload: %s", exc)
+            return None
 
     def _charge(self, component: str, prompt: str) -> bool:
         tokens = estimate_tokens(prompt)

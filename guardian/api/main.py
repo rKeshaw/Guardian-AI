@@ -167,6 +167,7 @@ async def start_scan(scan_request: ScanRequest):
 
 @app.get("/api/v1/scan/{session_id}/status")
 async def get_scan_status(session_id: str):
+    from guardian.core.config import settings
     if not orchestrator:
         raise HTTPException(503, detail="Orchestrator unavailable.")
 
@@ -193,6 +194,12 @@ async def get_scan_status(session_id: str):
         "session_id": status_data["session_id"],
         "status": status_data["status"],
         "progress": status_data.get("progress", {}).get("overall", 0),
+        "progress_detail": status_data.get("progress", {}),
+        "active_options": {
+            "vuln_analysis_seeding": settings.ENABLE_VULN_ANALYSIS_SEEDING,
+            "rag_probing": settings.ENABLE_RAG_PROBING,
+            "active_confirmation": settings.ENABLE_ACTIVE_CONFIRMATION,
+        },
         "started_at": status_data.get("started_at"),
         "completed_at": status_data.get("completed_at"),
         "error_message": status_data.get("error_message"),
@@ -237,6 +244,7 @@ async def stop_scan(session_id: str):
 
 @app.get("/api/v1/health")
 async def health_check():
+    from guardian.core.config import settings
     port = os.environ.get("GUARDIAN_PORT", "8888")
     health = orchestrator.get_workflow_health() if orchestrator else {}
     return {
@@ -249,6 +257,11 @@ async def health_check():
             "orchestrator": "available" if orchestrator else "unavailable",
             "active_sessions": health.get("active_sessions", 0),
             "available_slots": health.get("slots_available", 0),
+        },
+        "feature_flags": {
+            "vuln_analysis_seeding": settings.ENABLE_VULN_ANALYSIS_SEEDING,
+            "rag_probing": settings.ENABLE_RAG_PROBING,
+            "active_confirmation": settings.ENABLE_ACTIVE_CONFIRMATION,
         },
         "environment_warnings": env_warnings,
         "startup_error": startup_error,
