@@ -231,26 +231,42 @@ class PayloadGenerationAgent(BaseAgent):
         for target_url, data in recon_map.items():
             if not isinstance(data, dict) or "error" in data:
                 continue
-            tech_names = [
-                t.get("name") if isinstance(t, dict) else str(t)
-                for tech_list in data.get("technologies", {}).values()
-                for t in tech_list
-            ]
-            web = data.get("web_applications", {})
+            tech_names: list[str] = []
+            technologies_raw = data.get("technologies", {})
+            if isinstance(technologies_raw, dict):
+                for tech_list in technologies_raw.values():
+                    if not isinstance(tech_list, list):
+                        continue
+                    for t in tech_list:
+                        name = t.get("name") if isinstance(t, dict) else str(t)
+                        if name and name not in tech_names:
+                            tech_names.append(name)
+            elif isinstance(technologies_raw, list):
+                for t in technologies_raw:
+                    name = t.get("name") if isinstance(t, dict) else str(t)
+                    if name and name not in tech_names:
+                        tech_names.append(name)
+
+            forms = data.get("forms", [])
+            endpoints = data.get("api_endpoints", [])
+            if not forms or not endpoints:
+                web = data.get("web_applications", {}) if isinstance(data.get("web_applications"), dict) else {}
+                forms = forms or web.get("forms", [])
+                endpoints = endpoints or web.get("endpoints", [])
             context[target_url] = {
                 "technologies": tech_names[:15],
                 "open_ports": [
-                    f"{p.get('port')}/{p.get('service')}"
+                    f"{p.get('port')}/{p.get('service')}" if isinstance(p, dict) else str(p)
                     for p in data.get("open_ports", [])[:10]
                 ],
-                "endpoints": web.get("endpoints", [])[:20],
+                "endpoints": endpoints[:20],
                 "forms": [
                     {
                         "action": f.get("action"),
                         "method": f.get("method"),
                         "inputs": [i.get("name") for i in f.get("inputs", []) if i.get("name")],
                     }
-                    for f in web.get("forms", [])[:10]
+                    for f in forms[:10]
                 ],
             }
 

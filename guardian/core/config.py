@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     # If set, resolve_paths() maps it to DEFAULT_MODEL.
     OLLAMA_MODEL: str | None = None
     OLLAMA_MODEL_FAST: str = "llama3:latest"
+    AI_PROVIDER: str = "ollama"
+    AI_FALLBACK_PROVIDER: str = "none"
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    OPENAI_API_KEY: str = ""
+    OPENAI_MODEL: str = "gpt-4o-mini"
 
     # ── Pipeline / graph / reasoning controls ─
     MAX_GRAPH_TOKENS: int = 50000
@@ -44,11 +49,12 @@ class Settings(BaseSettings):
 
     # ── Integration Feature Flags ─────────────
     # Tier 2 integrations are opt-in and default OFF to preserve current behavior.
-    ENABLE_VULN_ANALYSIS_SEEDING: bool = False
-    ENABLE_RAG_PROBING: bool = False
-    ENABLE_ACTIVE_CONFIRMATION: bool = False
-    ENABLE_PAYLOAD_GENERATION: bool = False
-    ENABLE_ACTIVE_PENETRATION: bool = False
+    ENABLE_VULN_ANALYSIS_SEEDING: bool = True
+    ENABLE_RAG_PROBING: bool = True
+    ENABLE_ACTIVE_CONFIRMATION: bool = True
+    ENABLE_PAYLOAD_GENERATION: bool = True
+    ENABLE_ACTIVE_PENETRATION: bool = True
+    SCAN_EXECUTION_PROFILE: str = "aggressive"  # legacy | safe | balanced | aggressive
 
     # ── Reserved / currently unused — planned for future features ─
     # Kept for backward compatibility with existing deployments/.env files.
@@ -61,6 +67,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "guardian-ai-secret-key-change-in-production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     API_KEY: str = ""
+    REQUIRE_API_KEY: bool = False
     SCAN_TARGET_DENY_CIDRS: str = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,169.254.0.0/16,::1/128,fc00::/7"
     SCAN_TARGET_ALLOW_EXTERNAL_ONLY: bool = True
     CORS_ALLOW_ORIGINS: List[str] = ["*"]
@@ -139,7 +146,33 @@ class Settings(BaseSettings):
         if self.OLLAMA_MODEL:
             self.DEFAULT_MODEL = self.OLLAMA_MODEL
 
+        self._apply_scan_profile()
+
         return self
+    
+    def _apply_scan_profile(self) -> None:
+        profile = str(self.SCAN_EXECUTION_PROFILE or "legacy").strip().lower()
+        if profile == "legacy":
+            return
+        if profile == "safe":
+            self.ENABLE_VULN_ANALYSIS_SEEDING = True
+            self.ENABLE_PAYLOAD_GENERATION = False
+            self.ENABLE_ACTIVE_PENETRATION = False
+            self.ENABLE_ACTIVE_CONFIRMATION = False
+            return
+        if profile == "balanced":
+            self.ENABLE_VULN_ANALYSIS_SEEDING = True
+            self.ENABLE_PAYLOAD_GENERATION = True
+            self.ENABLE_ACTIVE_PENETRATION = False
+            self.ENABLE_ACTIVE_CONFIRMATION = False
+            return
+        if profile == "aggressive":
+            self.ENABLE_VULN_ANALYSIS_SEEDING = True
+            self.ENABLE_PAYLOAD_GENERATION = True
+            self.ENABLE_ACTIVE_PENETRATION = True
+            self.ENABLE_ACTIVE_CONFIRMATION = True
+            return
+        logger.warning("Unknown SCAN_EXECUTION_PROFILE '%s'; using legacy behavior", profile)
 
     def get_db_path(self) -> str:
         """Return the raw filesystem path (no sqlite:/// prefix)."""
@@ -174,6 +207,12 @@ class Settings(BaseSettings):
                 "SSL verification is disabled (VERIFY_SSL=False). "
                 "Reconnaissance traffic is vulnerable to MITM attacks."
             )
+
+        if self.REQUIRE_API_KEY and not self.API_KEY:
+            warnings.append("REQUIRE_API_KEY is true but API_KEY is empty; all API requests will be rejected.")
+
+        if self.AI_PROVIDER.lower() == "openai" and not self.OPENAI_API_KEY:
+            warnings.append("AI_PROVIDER=openai but OPENAI_API_KEY is empty; requests will fail unless fallback provider is configured.")
 
         if self.PROBE_DELAY_MIN >= self.PROBE_DELAY_MAX:
             warnings.append(

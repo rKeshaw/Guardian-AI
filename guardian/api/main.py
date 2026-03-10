@@ -54,6 +54,8 @@ app.add_middleware(
 
 def verify_api_key(x_api_key: str = Header(default="")) -> None:
     key = settings.API_KEY
+    if settings.REQUIRE_API_KEY and not key:
+        raise HTTPException(status_code=503, detail="API key auth is required but API_KEY is not configured")
     if key and x_api_key != key:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
@@ -319,7 +321,11 @@ async def health_check():
             "vuln_analysis_seeding": settings.ENABLE_VULN_ANALYSIS_SEEDING,
             "rag_probing": settings.ENABLE_RAG_PROBING,
             "active_confirmation": settings.ENABLE_ACTIVE_CONFIRMATION,
+            "payload_generation": settings.ENABLE_PAYLOAD_GENERATION,
+            "active_penetration": settings.ENABLE_ACTIVE_PENETRATION,
         },
+        "execution_profile": settings.SCAN_EXECUTION_PROFILE,
+        "ai_provider": settings.AI_PROVIDER,
         "environment_warnings": env_warnings,
         "startup_error": startup_error,
     }

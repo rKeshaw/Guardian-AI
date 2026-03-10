@@ -285,8 +285,6 @@ class ReconnaissanceAgent:
                     html_comments.append(comment_text)
 
             classification = self._classify_page(current, extracted_forms)
-            if title:
-                classification = classification
             page_classifications[current] = classification
 
         return {

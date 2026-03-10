@@ -1,5 +1,4 @@
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
   "anyio: mark test as requiring AnyIO/async test support",
@@ -8,5 +7,3 @@ markers = [
   "integration: full pipeline end-to-end (slow, up to 15min)",
   "timeout: per-test timeout hint",
 ]
-timeout = 300
-

@@ -3,15 +3,18 @@ guardian/agents/penetration_agent.py
 """
 
 import asyncio
+import json
 import logging
 import random
 import time
 import re
+import hashlib
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlencode, parse_qs
+from datetime import datetime
 
 import aiohttp
 from pydantic import BaseModel, Field
@@ -235,7 +238,13 @@ class PenetrationAgent(BaseAgent):
             "stealth_metrics": {"requests_made": 0, "detection_probability": 0.0},
         }
 
-        connector = aiohttp.TCPConnector(ssl=False, limit=10)
+        try:
+            from guardian.core.probing.probe_executor import _build_ssl_context
+            ssl_ctx = _build_ssl_context()
+        except Exception:
+            ssl_ctx = False if not settings.VERIFY_SSL else None
+
+        connector = aiohttp.TCPConnector(ssl=ssl_ctx, limit=10)
         timeout = aiohttp.ClientTimeout(total=20, connect=8)
         headers = {"User-Agent": random.choice(self._user_agents)}
 
@@ -290,10 +299,38 @@ class PenetrationAgent(BaseAgent):
         """
         points: list[InjectionPoint] = []
         seen: set[tuple] = set()
-        web = recon_data.get("web_applications", {})
+        web = recon_data.get("web_applications", {}) if isinstance(recon_data.get("web_applications"), dict) else {}
+
+        # From normalized flat injection points discovered by ReconnaissanceAgent
+        for raw in recon_data.get("injection_points", []):
+            if not isinstance(raw, dict):
+                continue
+            raw_url = str(raw.get("url", "")).strip()
+            method = str(raw.get("method", "GET")).upper()
+            param_name = str(raw.get("param_name", "")).strip()
+            if not raw_url or not param_name:
+                continue
+            abs_url = raw_url if raw_url.startswith(("http://", "https://")) else urljoin(target_url, raw_url)
+            key = (abs_url, method, param_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            points.append(
+                InjectionPoint(
+                    url=abs_url,
+                    method=method,
+                    param_name=param_name,
+                    source=str(raw.get("param_type", "query")),
+                )
+            )
+
+        endpoint_candidates = list(web.get("endpoints", []) if isinstance(web.get("endpoints", []), list) else [])
+        for endpoint in recon_data.get("api_endpoints", []):
+            if isinstance(endpoint, str):
+                endpoint_candidates.append(endpoint)
 
         # From URL query parameters discovered during crawl
-        for endpoint in web.get("endpoints", []):
+        for endpoint in endpoint_candidates:
             parsed = urlparse(endpoint)
             if not parsed.query:
                 continue
@@ -308,7 +345,7 @@ class PenetrationAgent(BaseAgent):
                     ))
 
         template_re = re.compile(r"\{([^}]+)\}")
-        for endpoint in web.get("endpoints", []):
+        for endpoint in endpoint_candidates:
             for param_name in template_re.findall(endpoint):
                 clean_url = template_re.sub("", endpoint)
                 key = (clean_url, "GET", param_name)
@@ -322,7 +359,12 @@ class PenetrationAgent(BaseAgent):
                     ))
                     
         # From HTML forms
-        for form in web.get("forms", []):
+        form_candidates = list(web.get("forms", []) if isinstance(web.get("forms", []), list) else [])
+        for form in recon_data.get("forms", []):
+            if isinstance(form, dict):
+                form_candidates.append(form)
+
+        for form in form_candidates:
             raw_action = form.get("action") or target_url
             # FIX 06: absolutize at discovery time
             abs_action = (
@@ -628,7 +670,29 @@ class PenetrationAgent(BaseAgent):
         total_exploits = sum(
             len(t.get("successful_exploits", [])) for t in pen.values()
         )
+        manifest: list[dict[str, Any]] = []
+        for target, target_result in pen.items():
+            if not isinstance(target_result, dict):
+                continue
+            for exploit in target_result.get("successful_exploits", []):
+                if not isinstance(exploit, dict):
+                    continue
+                manifest.append(
+                    {
+                        "target": target,
+                        "vulnerability": exploit.get("vulnerability"),
+                        "owasp_category": exploit.get("owasp_category"),
+                        "impact_level": exploit.get("impact_level"),
+                        "payload": exploit.get("successful_payload"),
+                    }
+                )
+
+        canonical = json.dumps(manifest, sort_keys=True, ensure_ascii=False)
+        evidence_hash = hashlib.sha256(canonical.encode("utf-8", errors="replace")).hexdigest()
+
         return {
+            "schema_version": "1.1",
+            "generated_at": datetime.utcnow().isoformat(),
             "total_successful_exploits": total_exploits,
             "overall_risk": (
                 "Critical" if total_exploits >= 3 else
@@ -636,4 +700,6 @@ class PenetrationAgent(BaseAgent):
                 "Medium" if total_exploits >= 1 else
                 "Low"
             ),
+            "exploit_manifest": manifest,
+            "evidence_hash_sha256": evidence_hash,
         }

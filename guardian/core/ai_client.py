@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import re
+from urllib import request as urllib_request
+from urllib import error as urllib_error
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Any, Type
@@ -184,6 +186,53 @@ class AIClient:
                 )
         return self._client
 
+    def _provider_chain(self) -> list[str]:
+        primary = str(settings.AI_PROVIDER or "ollama").strip().lower()
+        fallback = str(settings.AI_FALLBACK_PROVIDER or "none").strip().lower()
+        chain = [primary]
+        if fallback not in {"", "none", primary}:
+            chain.append(fallback)
+        return chain
+
+    def _openai_compatible_chat(self, model_name: str, messages: list[dict], options: dict[str, Any]) -> str | None:
+        api_key = settings.OPENAI_API_KEY
+        if not api_key:
+            logger.error("OPENAI_API_KEY is required for AI_PROVIDER=openai")
+            return None
+
+        payload: dict[str, Any] = {
+            "model": settings.OPENAI_MODEL or model_name,
+            "messages": messages,
+            "temperature": options.get("temperature", 0.3),
+            "top_p": options.get("top_p", 0.9),
+            "response_format": {"type": "json_object"},
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib_request.Request(
+            url=f"{settings.OPENAI_BASE_URL.rstrip('/')}/chat/completions",
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=60) as resp:
+                body = json.loads(resp.read().decode("utf-8", errors="replace"))
+        except urllib_error.URLError as exc:
+            logger.error("OpenAI-compatible call failed: %s", exc)
+            return None
+        except Exception as exc:
+            logger.error("OpenAI-compatible response parse failed: %s", exc)
+            return None
+
+        try:
+            return str(body["choices"][0]["message"]["content"]).strip()
+        except Exception:
+            logger.error("OpenAI-compatible response missing choices/message/content")
+            return None
+        
     def reinitialize(self) -> None:
         """Force reconnect to Ollama (e.g. after URL change)."""
         self.base_url = settings.OLLAMA_BASE_URL
@@ -234,22 +283,35 @@ class AIClient:
             options["temperature"] = cfg.get("temperature", 0.3)
             options["top_p"] = cfg.get("top_p", 0.9)
 
-        client = self._get_client()
+        def _call_provider(provider: str) -> str | None:
+            if provider == "ollama":
+                client = self._get_client()
+                try:
+                    resp = client.chat(
+                        model=model_name,
+                        messages=messages,
+                        format="json",
+                        options=options,
+                    )
+                    if resp and "message" in resp:
+                        return resp["message"]["content"].strip()
+                    return None
+                except Exception as exc:
+                    logger.error("Ollama call failed model=%s error=%s", model_name, exc)
+                    return None
+
+            if provider == "openai":
+                return self._openai_compatible_chat(model_name, messages, options)
+
+            logger.error("Unsupported AI provider '%s'", provider)
+            return None
 
         def _call() -> str | None:
-            try:
-                resp = client.chat(
-                    model=model_name,
-                    messages=messages,
-                    format="json",
-                    options=options,
-                )
-                if resp and "message" in resp:
-                    return resp["message"]["content"].strip()
-                return None
-            except Exception as exc:
-                logger.error("Ollama call failed model=%s error=%s", model_name, exc)
-                return None
+            for provider in self._provider_chain():
+                out = _call_provider(provider)
+                if out:
+                    return out
+            return None
 
         # FIX 09: get_running_loop(), not get_event_loop()
         loop = asyncio.get_running_loop()

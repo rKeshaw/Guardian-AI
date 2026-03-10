@@ -43,3 +43,22 @@ async def test_query_ai_options_include_persona_runtime_params_without_format(mo
     assert "temperature" in options
     assert "top_p" in options
     assert "format" not in options
+
+def test_provider_chain_includes_fallback_when_distinct(monkeypatch):
+    client = AIClient()
+    monkeypatch.setattr("guardian.core.ai_client.settings.AI_PROVIDER", "openai")
+    monkeypatch.setattr("guardian.core.ai_client.settings.AI_FALLBACK_PROVIDER", "ollama")
+
+    chain = client._provider_chain()
+
+    assert chain == ["openai", "ollama"]
+
+
+def test_provider_chain_omits_none_fallback(monkeypatch):
+    client = AIClient()
+    monkeypatch.setattr("guardian.core.ai_client.settings.AI_PROVIDER", "ollama")
+    monkeypatch.setattr("guardian.core.ai_client.settings.AI_FALLBACK_PROVIDER", "none")
+
+    chain = client._provider_chain()
+
+    assert chain == ["ollama"]

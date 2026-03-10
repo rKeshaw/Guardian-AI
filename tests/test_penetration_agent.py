@@ -55,3 +55,29 @@ def test_discover_injection_points_extracts_path_template_param():
     )
 
     assert any(p.param_name == "id" and p.method == "GET" for p in points)
+
+
+def test_build_evidence_package_contains_manifest_and_hash():
+    agent = PenetrationAgent(None)
+    results = {
+        "penetration_results": {
+            "https://example.com": {
+                "successful_exploits": [
+                    {
+                        "vulnerability": "SQL Injection",
+                        "owasp_category": "A03:2023",
+                        "successful_payload": "' OR '1'='1",
+                        "impact_level": "High",
+                    }
+                ]
+            }
+        }
+    }
+
+    evidence = agent._build_evidence_package(results)
+
+    assert evidence["total_successful_exploits"] == 1
+    assert evidence["overall_risk"] in {"Medium", "High", "Critical"}
+    assert evidence["schema_version"] == "1.1"
+    assert len(evidence["exploit_manifest"]) == 1
+    assert len(evidence["evidence_hash_sha256"]) == 64
