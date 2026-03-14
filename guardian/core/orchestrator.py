@@ -188,6 +188,17 @@ class CentralOrchestrator:
 
         try:
             await self._run_phase(ctx, "reconnaissance")
+            recon_result = ctx.phase_results.get("reconnaissance", {})
+            if "reconnaissance" not in ctx.failed_phases and not recon_result.get("url") and not recon_result.get("domain"):
+                ctx.status = ScanStatus.ERROR
+                ctx.error_message = "Reconnaissance phase produced empty result — aborting pipeline."
+                ctx.completed_at = datetime.utcnow()
+                await self._save_session(ctx)
+                self._publish(ctx, {"event": "scan_error", "session_id": ctx.session_id, "error": ctx.error_message})
+                return
+            deterministic_findings = await self._run_deterministic_checks(ctx)
+            ctx.phase_results["deterministic_findings"] = deterministic_findings
+            ctx.results["deterministic_findings"] = deterministic_findings
             await self._run_phase(ctx, "vulnerability_analysis")
             await self._run_phase(ctx, "hypothesis_seeding")
             await self._run_phase(ctx, "payload_generation")
@@ -210,6 +221,7 @@ class CentralOrchestrator:
                 ctx.status = ScanStatus.COMPLETED
             ctx.completed_at = datetime.utcnow()
             await self._save_session(ctx)
+            self._publish(ctx, {"event": "scan_complete", "session_id": ctx.session_id})
 
         except asyncio.CancelledError:
             raise
@@ -218,6 +230,7 @@ class CentralOrchestrator:
             ctx.error_message = str(exc)
             ctx.completed_at = datetime.utcnow()
             await self._save_session(ctx)
+            self._publish(ctx, {"event": "scan_error", "session_id": ctx.session_id, "error": str(exc)})
 
     def _is_required_phase(self, phase_name: str) -> bool:
         if phase_name == "vulnerability_analysis":
@@ -233,6 +246,7 @@ class CentralOrchestrator:
     async def _run_phase(self, ctx: ScanContext, phase_name: str) -> dict[str, Any]:
         t0 = datetime.utcnow()
         ctx.agents[phase_name] = {"status": "running"}
+        self._publish(ctx, {"event": "phase_start", "phase": phase_name})
 
         if phase_name == "vulnerability_analysis" and not settings.ENABLE_VULN_ANALYSIS_SEEDING:
             result = VulnAnalysisPhaseOutput(
@@ -250,6 +264,14 @@ class CentralOrchestrator:
                 "skipped": True,
             }
             ctx.agents[phase_name] = {"status": "completed", "skipped": True}
+            self._publish(
+                ctx,
+                {
+                    "event": "phase_complete",
+                    "phase": phase_name,
+                    "data": {"duration_s": round(duration, 2), "skipped": True},
+                },
+            )
             return result
 
         if phase_name == "active_confirmation" and not settings.ENABLE_ACTIVE_CONFIRMATION:
@@ -264,6 +286,14 @@ class CentralOrchestrator:
                 "skipped": True,
             }
             ctx.agents[phase_name] = {"status": "completed", "skipped": True}
+            self._publish(
+                ctx,
+                {
+                    "event": "phase_complete",
+                    "phase": phase_name,
+                    "data": {"duration_s": round(duration, 2), "skipped": True},
+                },
+            )
             return result
 
         if phase_name == "payload_generation" and not settings.ENABLE_PAYLOAD_GENERATION:
@@ -278,6 +308,14 @@ class CentralOrchestrator:
                 "skipped": True,
             }
             ctx.agents[phase_name] = {"status": "completed", "skipped": True}
+            self._publish(
+                ctx,
+                {
+                    "event": "phase_complete",
+                    "phase": phase_name,
+                    "data": {"duration_s": round(duration, 2), "skipped": True},
+                },
+            )
             return result
 
         if phase_name == "active_penetration" and not settings.ENABLE_ACTIVE_PENETRATION:
@@ -292,6 +330,14 @@ class CentralOrchestrator:
                 "skipped": True,
             }
             ctx.agents[phase_name] = {"status": "completed", "skipped": True}
+            self._publish(
+                ctx,
+                {
+                    "event": "phase_complete",
+                    "phase": phase_name,
+                    "data": {"duration_s": round(duration, 2), "skipped": True},
+                },
+            )
             return result
         
         try:
@@ -320,6 +366,17 @@ class CentralOrchestrator:
             self._record_typed_phase_result(ctx, phase_name, result)
             ctx.agent_metrics[phase_name] = {"execution_time_s": round(duration, 2), "success": True}
             ctx.agents[phase_name] = {"status": "completed"}
+            self._publish(
+                ctx,
+                {
+                    "event": "phase_complete",
+                    "phase": phase_name,
+                    "data": {
+                        "duration_s": round(duration, 2),
+                        "skipped": bool(result.get("skipped", False)),
+                    },
+                },
+            )
             return result
         except Exception as exc:
             duration = (datetime.utcnow() - t0).total_seconds()
@@ -333,6 +390,7 @@ class CentralOrchestrator:
                 ctx.failed_phases.append(phase_name)
             ctx.agents[phase_name] = {"status": "failed", "error": str(exc)}
             logger.error("Phase failed phase=%s session_id=%s error=%s", phase_name, ctx.session_id, exc)
+            self._publish(ctx, {"event": "phase_error", "phase": phase_name, "data": {"error": str(exc)}})
             return {}
 
     async def _run_reconnaissance(self, ctx: ScanContext) -> dict[str, Any]:
@@ -651,6 +709,7 @@ class CentralOrchestrator:
                 ctx.graph,
                 probe_executor,
                 ctx.ledger,
+                event_queue=ctx.event_queue,
             )
         finally:
             await probe_executor.close()
@@ -660,12 +719,84 @@ class CentralOrchestrator:
         ctx.phase_results["graph_exploration"] = result
         return result
 
+    async def _run_deterministic_checks(self, ctx: ScanContext) -> list[dict]:
+        recon = ctx.phase_results.get("reconnaissance", {})
+        findings = []
+
+        interesting_paths = recon.get("interesting_paths", [])
+        signals = recon.get("attack_surface_signals", [])
+
+        if any("/.git/HEAD" in p for p in interesting_paths):
+            findings.append({
+                "vulnerability_name": "Git Repository Exposure",
+                "owasp_category": "A05:2023",
+                "risk_level": "High",
+                "cwe": "CWE-538",
+                "deterministic": True,
+                "evidence": "/.git/HEAD returned HTTP 200 — source code may be accessible",
+                "remediation": "Block public access to .git directory via web server configuration",
+            })
+
+        if any("/.env" in p for p in interesting_paths):
+            findings.append({
+                "vulnerability_name": "Environment File Exposure",
+                "owasp_category": "A05:2023",
+                "risk_level": "Critical",
+                "cwe": "CWE-540",
+                "deterministic": True,
+                "evidence": "/.env returned HTTP 200 — credentials and configuration may be exposed",
+                "remediation": "Block public access to .env files. Move secrets to a secrets manager.",
+            })
+
+        if any("/actuator" in p for p in interesting_paths):
+            findings.append({
+                "vulnerability_name": "Spring Boot Actuator Exposure",
+                "owasp_category": "A05:2023",
+                "risk_level": "High",
+                "cwe": "CWE-200",
+                "deterministic": True,
+                "evidence": "/actuator endpoint returned HTTP 200 — internal application state exposed",
+                "remediation": "Disable or restrict actuator endpoints. Apply Spring Security to actuator routes.",
+            })
+
+        target_url = recon.get("url", "")
+        if target_url.startswith("https://"):
+            if any("Missing HSTS" in s for s in signals):
+                findings.append({
+                    "vulnerability_name": "Missing HTTP Strict Transport Security",
+                    "owasp_category": "A02:2023",
+                    "risk_level": "Medium",
+                    "cwe": "CWE-319",
+                    "deterministic": True,
+                    "evidence": "HTTPS endpoint does not return Strict-Transport-Security header",
+                    "remediation": "Add: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload",
+                })
+
+        if any("Allow-Credentials:true" in s for s in signals):
+            findings.append({
+                "vulnerability_name": "CORS Misconfiguration with Credentials",
+                "owasp_category": "A05:2023",
+                "risk_level": "Critical",
+                "cwe": "CWE-942",
+                "deterministic": True,
+                "evidence": "Server reflects arbitrary Origin with Access-Control-Allow-Credentials: true",
+                "remediation": "Never combine wildcard or reflected origins with Allow-Credentials: true. Maintain an explicit origin allowlist.",
+            })
+
+        return findings
+
     async def _run_reporting(self, ctx: ScanContext) -> dict[str, Any]:
         from guardian.agents.reporting_agent import ReportingAgent
         from guardian.core.ai_client import ai_client
 
         agent = ReportingAgent(self.db, ai_client)
-        report = await agent.generate(ctx.graph, ctx.phase_results, ctx.session_id, ctx.ledger)
+        report = await agent.generate(
+            ctx.graph,
+            ctx.phase_results,
+            ctx.session_id,
+            ctx.ledger,
+            deterministic_findings=ctx.phase_results.get("deterministic_findings", []),
+        )
         ctx.phase_results["reporting"] = report
         await self.db.save_agent_result(ctx.session_id, "reporting", report)
         return report
@@ -843,6 +974,12 @@ class CentralOrchestrator:
             }
             ctx.typed_phase_results.reporting = ReportPhaseOutput.model_validate(data)
 
+    def _publish(self, ctx: ScanContext, event: dict) -> None:
+        try:
+            ctx.event_queue.put_nowait({**event, "timestamp": datetime.utcnow().isoformat()})
+        except asyncio.QueueFull:
+            pass
+
     def _get_context(self, session_id: str) -> ScanContext:
         ctx = self._registry.get(session_id)
         if ctx is None:
@@ -888,6 +1025,9 @@ class CentralOrchestrator:
                 p: (100.0 if _is_phase_done(p) else 0.0)
                 for p in phases
             },
+            "deterministic_findings_count": len(ctx.phase_results.get("deterministic_findings", []))
+            if isinstance(ctx.phase_results.get("deterministic_findings", []), list)
+            else 0,
         }
 
     def _results_preview(self, ctx: ScanContext) -> dict[str, Any]:
@@ -899,11 +1039,16 @@ class CentralOrchestrator:
         explore = ctx.results.get("graph_exploration", {})
         active_confirm = ctx.results.get("active_confirmation", {})
         report = ctx.results.get("reporting", {})
+        deterministic = ctx.results.get("deterministic_findings", [])
         return {
             "reconnaissance": {
                 "completed": "reconnaissance" in ctx.results,
                 "domain": recon.get("domain"),
                 "injection_points": len(recon.get("injection_points", [])),
+            },
+            "deterministic_findings": {
+                "completed": "deterministic_findings" in ctx.results,
+                "deterministic_findings_count": len(deterministic) if isinstance(deterministic, list) else 0,
             },
             "vulnerability_analysis": {
                 "completed": "vulnerability_analysis" in ctx.results,

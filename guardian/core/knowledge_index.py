@@ -29,8 +29,11 @@ OWASP_TO_FILES: dict[str, list[str]] = {
     "rfi":              ["File Inclusion.md"],
 
     # A02 — Cryptographic Failures
-    "a02:2023":         ["HTTP Parameter Pollution.md"],
+    "a02:2023":         ["CORS Misconfiguration.md"],
     "cryptographic":    [],
+    "tls":              ["CORS Misconfiguration.md"],
+    "ssl":              ["CORS Misconfiguration.md"],
+    "sensitive data":   ["CORS Misconfiguration.md"],
 
     # A03 — Injection
     "a03:2023":         ["SQL Injection.md", "XSS Injection.md", "Command Injection.md",

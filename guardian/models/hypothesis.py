@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -8,7 +7,10 @@ from pydantic import BaseModel, Field, field_validator
 
 _ALLOWED_PARAM_TYPES = {"query", "form", "json", "header", "cookie"}
 _ALLOWED_METHODS = {"GET", "POST", "PUT", "DELETE", "PATCH"}
-_OWASP_RE = re.compile(r"^A\d{2}:202[0-9]$")
+_VALID_OWASP_CATEGORIES = {
+    "A01:2023", "A02:2023", "A03:2023", "A04:2023", "A05:2023",
+    "A06:2023", "A07:2023", "A08:2023", "A09:2023", "A10:2023",
+}
 
 
 class InjectionPointSchema(BaseModel):
@@ -52,8 +54,8 @@ class HypothesisSchema(BaseModel):
     @classmethod
     def _validate_owasp_category(cls, value: str) -> str:
         category = (value or "").strip()
-        if not _OWASP_RE.match(category):
-            raise ValueError("owasp_category must match pattern A##:202#")
+        if category not in _VALID_OWASP_CATEGORIES:
+            raise ValueError(f"owasp_category must be one of {sorted(_VALID_OWASP_CATEGORIES)}")
         return category
 
     @field_validator("owasp_impact")

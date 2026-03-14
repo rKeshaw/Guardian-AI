@@ -252,7 +252,7 @@ class Database:
         await self.save_agent_results(session_id, agent_name, results)
 
     async def upsert_node(self, graph_id: str, node: dict[str, Any]) -> None:
-        await self.initialize()
+        # Schema guaranteed by Database.initialize() called at startup.
         now = datetime.utcnow().isoformat()
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
@@ -279,7 +279,7 @@ class Database:
             await db.commit()
 
     async def upsert_graph_meta(self, graph_id: str, meta: dict[str, Any]) -> None:
-        await self.initialize()
+        # Schema guaranteed by Database.initialize() called at startup.
         now = datetime.utcnow().isoformat()
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
@@ -299,7 +299,7 @@ class Database:
             await db.commit()
 
     async def upsert_edge(self, graph_id: str, edge: dict[str, Any]) -> None:
-        await self.initialize()
+        # Schema guaranteed by Database.initialize() called at startup.
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """

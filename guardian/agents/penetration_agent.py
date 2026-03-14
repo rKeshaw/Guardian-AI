@@ -45,9 +45,11 @@ _SUCCESS_INDICATORS: dict[str, list[str]] = {
     "A01:2023": [
         "root:x:0:0",
         "uid=0(root)",
-        "passwd:",  # kept despite length<8; highly specific /etc/passwd artifact
         "[boot loader]",
         "/etc/passwd",
+        "/etc/shadow",
+        "www-data",
+        "daemon:x:",
     ],
     "A02:2023": ["-----BEGIN", "private key", "encryption key"],
     "A03:2023": [
@@ -605,18 +607,19 @@ class PenetrationAgent(BaseAgent):
 
         # Status code bypass refinement for auth-gated endpoints.
         if baseline and baseline.status_code in (401, 403) and test.status_code == 200:
+            snippet = str(test.evidence.get("response_snippet", ""))[:1000].lower()
+            soft_error_markers = ["access denied", "forbidden", "not found", "error", "invalid", "unauthorized", "login", "sign in"]
+            contains_soft_error = any(marker in snippet for marker in soft_error_markers)
             length_ratio = (test.body_length / baseline.body_length) if baseline.body_length > 0 else 0.0
-            snippet_500 = str(test.evidence.get("response_snippet", ""))[:500].lower()
-            soft_error_markers = ["access denied", "forbidden", "not found", "error", "invalid"]
-            contains_soft_error = any(marker in snippet_500 for marker in soft_error_markers)
-            if length_ratio > 1.3 or not contains_soft_error:
+            # Require BOTH: no soft error markers AND significant body length increase
+            if not contains_soft_error and length_ratio > 1.5:
                 new.append(f"status_code_bypass:{baseline.status_code}→200")
 
-        # Body length explosion: >50% larger than baseline (possible data dump)
+        # Body length increase contributes only when paired with other indicators.
         if baseline and baseline.body_length > 0:
             ratio = test.body_length / baseline.body_length
-            if ratio > 1.5:
-                new.append(f"body_length_increase:{ratio:.1f}x")
+            if ratio > 2.0 and len(new) > 0:
+                new.append(f"body_length_increase_with_indicators:{ratio:.1f}x")
 
         # Time-based detection using calibrated per-target threshold.
         if baseline and baseline.response_time_ms > 0:

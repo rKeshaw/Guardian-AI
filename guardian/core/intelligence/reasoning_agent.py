@@ -328,7 +328,48 @@ set exploitation_evidence to a dict with keys:
         )
         return prompt + "\n\nSYSTEM OVERRIDE:\n" + json.dumps(override_message)
 
-    def _build_finding_node(self, hypothesis_node: Node, memory: ConversationMemory, llm_response: dict[str, Any], graph: AttackGraph) -> Node:
+    def _build_finding_node(self, hypothesis_node: Node, memory: ConversationMemory, llm_response: dict[str, Any], graph: AttackGraph) -> Node | None:
+        exploitation_evidence = llm_response.get("exploitation_evidence")
+
+        VALID_PROOF_TYPES = {"error_based", "boolean_based", "time_based", "reflected", "rce", "data_extracted"}
+        VALID_SEVERITIES = {"critical", "high", "medium", "low"}
+
+        if not isinstance(exploitation_evidence, dict):
+            graph.resolve_hypothesis(hypothesis_node.id, NodeType.DEAD_END)
+            logger.warning(
+                "Exploitation claimed but evidence is not a dict — rejecting finding hypothesis=%s",
+                hypothesis_node.id,
+            )
+            return None
+
+        proof_type = str(exploitation_evidence.get("proof_type", "")).strip().lower()
+        severity = str(exploitation_evidence.get("severity", "")).strip().lower()
+        payload_used = str(exploitation_evidence.get("payload_used", "")).strip()
+
+        if proof_type not in VALID_PROOF_TYPES:
+            graph.resolve_hypothesis(hypothesis_node.id, NodeType.DEAD_END)
+            logger.warning("Invalid proof_type '%s' — rejecting finding", proof_type)
+            return None
+
+        if severity not in VALID_SEVERITIES:
+            exploitation_evidence["severity"] = "medium"
+
+        if not payload_used:
+            graph.resolve_hypothesis(hypothesis_node.id, NodeType.DEAD_END)
+            logger.warning(
+                "Exploitation claimed but no payload_used — rejecting finding hypothesis=%s",
+                hypothesis_node.id,
+            )
+            return None
+
+        if not memory.confirmed_facts:
+            graph.resolve_hypothesis(hypothesis_node.id, NodeType.DEAD_END)
+            logger.warning(
+                "Exploitation claimed but no confirmed_facts accumulated — rejecting finding hypothesis=%s",
+                hypothesis_node.id,
+            )
+            return None
+
         finding = Node(
             id=str(uuid.uuid4()),
             type=NodeType.FINDING,
@@ -339,7 +380,7 @@ set exploitation_evidence to a dict with keys:
                 "hypothesis": hypothesis_node.data.get("hypothesis"),
                 "owasp_category": hypothesis_node.data.get("owasp_category"),
                 "owasp_impact": hypothesis_node.data.get("owasp_impact", 5),
-                "exploitation_evidence": llm_response.get("exploitation_evidence"),
+                "exploitation_evidence": exploitation_evidence,
                 "confirmed_facts": list(memory.confirmed_facts),
                 "injection_point": hypothesis_node.data.get("injection_point"),
                 "turn_count": memory.turn_count,

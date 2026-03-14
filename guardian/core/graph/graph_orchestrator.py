@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import asyncio
 import logging
-from typing import Any
+from datetime import datetime
 
 from guardian.core.ai_client import AIPersona, estimate_tokens
 from guardian.core.config import settings
 from guardian.core.graph.attack_graph import AttackGraph, Edge, EdgeType, Node, NodeType
 from guardian.core.graph.priority_queue import HypothesisPriorityQueue
 from guardian.core.token_ledger import TokenLedger
+from guardian.core.utils import charge_ledger, unpack_query_result
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class GraphOrchestrator:
         graph: AttackGraph,
         probe_executor,
         ledger: TokenLedger,
+        event_queue=None,
     ) -> AttackGraph:
         from guardian.agents.hypothesis_agent import HypothesisAgent
         from guardian.core.intelligence.reasoning_agent import ReasoningAgent
@@ -43,7 +45,9 @@ class GraphOrchestrator:
         persisted_ids: set[str] = set()
         self._priority_queue = None
 
+        iteration = 0
         while graph.frontier and not ledger.is_critical():
+            iteration += 1
             max_graph_tokens = int(settings.MAX_GRAPH_TOKENS)
             compress_threshold = float(settings.GRAPH_COMPRESS_THRESHOLD)
             threshold_tokens = max_graph_tokens * compress_threshold
@@ -59,6 +63,18 @@ class GraphOrchestrator:
                 hypothesis_node.id,
                 hypothesis_node.confidence,
                 hypothesis_node.data.get("owasp_category"),
+            )
+            self._publish(
+                event_queue,
+                {
+                    "event": "hypothesis_exploring",
+                    "data": {
+                        "id": hypothesis_node.id,
+                        "hypothesis": hypothesis_node.data.get("hypothesis", "")[:120],
+                        "owasp": hypothesis_node.data.get("owasp_category", ""),
+                        "confidence": hypothesis_node.confidence,
+                    },
+                },
             )
 
             await self.db.upsert_node(graph.graph_id, hypothesis_node.to_dict())
@@ -80,6 +96,18 @@ class GraphOrchestrator:
                 except Exception:
                     pass
                 persisted_ids.discard(hypothesis_node.id)
+                self._publish(
+                    event_queue,
+                    {
+                        "event": "finding_added",
+                        "data": {
+                            "id": finding.id,
+                            "hypothesis": finding.data.get("hypothesis", "")[:120],
+                            "owasp": finding.data.get("owasp_category", ""),
+                            "confidence": finding.confidence,
+                        },
+                    },
+                )
                 await self._expand_from_finding(
                     finding=finding,
                     graph=graph,
@@ -97,6 +125,7 @@ class GraphOrchestrator:
                 except Exception:
                     pass
                 persisted_ids.discard(hypothesis_node.id)
+                self._publish(event_queue, {"event": "hypothesis_dead", "data": {"id": hypothesis_node.id}})
 
             for node_id, node in graph.nodes.items():
                 if node_id not in persisted_ids:
@@ -118,6 +147,8 @@ class GraphOrchestrator:
                     "frontier_size": len(graph.frontier),
                 },
             )
+            if iteration % 5 == 0:
+                self._publish(event_queue, {"event": "ledger_update", "data": ledger.snapshot()})
         logger.debug("Token budget: %s", ledger.render_breakdown())
         return graph
 
@@ -169,12 +200,12 @@ class GraphOrchestrator:
             "containing a list of hypothesis dicts using the same schema as before."
         )
 
-        if not self._charge(ledger, "graph_expansion", prompt):
+        if not charge_ledger(ledger, "graph_expansion", prompt):
             return
 
         persona = AIPersona.HYPOTHESIS_ENGINE
         raw = await self.ai_client.query_with_retry(prompt, persona=persona)
-        payload = self._unpack_query_result(raw)
+        payload = unpack_query_result(raw)
         if not isinstance(payload, dict):
             return
 
@@ -233,20 +264,10 @@ class GraphOrchestrator:
                 break
 
     @staticmethod
-    def _charge(ledger: TokenLedger, component: str, prompt: str) -> bool:
-        tokens = estimate_tokens(prompt)
+    def _publish(event_queue, event: dict) -> None:
+        if event_queue is None:
+            return
         try:
-            return bool(ledger.charge(tokens, component=component))
-        except TypeError:
-            return bool(ledger.charge(component, tokens))
-
-    @staticmethod
-    def _unpack_query_result(raw_result: Any) -> Any | None:
-        if raw_result is None:
-            return None
-        if isinstance(raw_result, tuple) and len(raw_result) == 2:
-            payload, err = raw_result
-            if err:
-                return None
-            return payload
-        return raw_result
+            event_queue.put_nowait({**event, "timestamp": datetime.utcnow().isoformat()})
+        except Exception:
+            pass

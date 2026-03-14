@@ -3,6 +3,7 @@ guardian/api/main.py
 """
 
 import asyncio
+import json
 import logging
 import os
 import traceback
@@ -12,9 +13,10 @@ from datetime import datetime
 
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, AnyHttpUrl, Field
 from typing import Any, Dict, List, Optional
 
@@ -39,6 +41,10 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 from guardian.core.config import settings
 
@@ -184,6 +190,11 @@ async def initialize_guardian_components() -> bool:
 # ── Routes ─────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
+    index_path = os.path.join(os.path.dirname(__file__), "..", "static", "index.html")
+    if os.path.exists(index_path):
+        with open(index_path, encoding="utf-8") as f:
+            return f.read()
+
     port = os.environ.get("GUARDIAN_PORT", "8888")
     return f"""<!DOCTYPE html>
 <html>
@@ -289,6 +300,98 @@ async def get_scan_results(session_id: str):
     if not results:
         raise HTTPException(404, detail="Results not found. Scan may still be in progress.")
     return JSONResponse(content={"session_id": session_id, "results": results})
+
+
+@app.get("/api/v1/scan/{session_id}/report/json", dependencies=[Depends(verify_api_key)])
+async def export_report_json(session_id: str):
+    if not database:
+        raise HTTPException(503, detail="Database unavailable.")
+    results = await database.get_results(session_id)
+    if not results:
+        raise HTTPException(404, detail="Results not found")
+    return JSONResponse(content={"session_id": session_id, "results": results})
+
+
+@app.get("/api/v1/scan/{session_id}/report/html", dependencies=[Depends(verify_api_key)])
+async def export_report_html(session_id: str):
+    if not database:
+        raise HTTPException(503, detail="Database unavailable.")
+    results = await database.get_results(session_id)
+    if not results:
+        raise HTTPException(404, detail="Results not found")
+    from guardian.core.report_renderer import render_html_report
+
+    html_content = render_html_report(session_id, results)
+    return HTMLResponse(content=html_content)
+
+
+@app.get("/api/v1/scan/{session_id}/report/markdown", dependencies=[Depends(verify_api_key)])
+async def export_report_markdown(session_id: str):
+    if not database:
+        raise HTTPException(503, detail="Database unavailable.")
+    results = await database.get_results(session_id)
+    if not results:
+        raise HTTPException(404, detail="Results not found")
+    from guardian.core.report_renderer import render_markdown_report
+
+    md_content = render_markdown_report(session_id, results)
+    return PlainTextResponse(content=md_content, media_type="text/markdown")
+
+
+@app.websocket("/ws/scan/{session_id}")
+async def scan_websocket(websocket: WebSocket, session_id: str, api_key: str = ""):
+    if settings.REQUIRE_API_KEY and settings.API_KEY and api_key != settings.API_KEY:
+        await websocket.close(code=1008)
+        return
+
+    if not orchestrator:
+        await websocket.close(code=1008)
+        return
+
+    ctx = orchestrator._registry.get(session_id)
+    if not ctx:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(ctx.event_queue.get(), timeout=30.0)
+                await websocket.send_json(event)
+                if event.get("event") in ("scan_complete", "scan_error"):
+                    break
+            except asyncio.TimeoutError:
+                await websocket.send_json(
+                    {"event": "heartbeat", "timestamp": datetime.utcnow().isoformat()}
+                )
+    except WebSocketDisconnect:
+        pass
+
+
+@app.get("/api/v1/scan/{session_id}/stream")
+async def scan_sse(session_id: str, request: Request):
+    if not orchestrator:
+        raise HTTPException(503, detail="Orchestrator unavailable.")
+
+    ctx = orchestrator._registry.get(session_id)
+    if not ctx:
+        raise HTTPException(404, detail=f"Session '{session_id}' not found.")
+
+    async def _event_stream():
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                event = await asyncio.wait_for(ctx.event_queue.get(), timeout=30.0)
+                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("event") in ("scan_complete", "scan_error"):
+                    break
+            except asyncio.TimeoutError:
+                yield ": keep-alive\n\n"
+
+    return StreamingResponse(_event_stream(), media_type="text/event-stream")
 
 
 @app.delete("/api/v1/scan/{session_id}", dependencies=[Depends(verify_api_key)])

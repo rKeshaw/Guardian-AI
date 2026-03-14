@@ -6,11 +6,26 @@ from datetime import datetime
 from math import ceil
 from typing import Any
 
-from guardian.core.ai_client import AIPersona, estimate_tokens
+from guardian.core.ai_client import AIPersona
 from guardian.core.graph.attack_graph import AttackGraph, Node
 from guardian.core.token_ledger import TokenLedger
+from guardian.core.utils import charge_ledger, unpack_query_result
 
 logger = logging.getLogger(__name__)
+
+
+_OWASP_TO_CWE: dict[str, str] = {
+    "A01:2023": "CWE-284",
+    "A02:2023": "CWE-311",
+    "A03:2023": "CWE-89",
+    "A04:2023": "CWE-657",
+    "A05:2023": "CWE-16",
+    "A06:2023": "CWE-1104",
+    "A07:2023": "CWE-287",
+    "A08:2023": "CWE-502",
+    "A09:2023": "CWE-778",
+    "A10:2023": "CWE-918",
+}
 
 
 class ReportingAgent:
@@ -24,6 +39,7 @@ class ReportingAgent:
         phase_results: dict,
         session_id: str,
         ledger: TokenLedger,
+        deterministic_findings: list[dict[str, Any]] | None = None,
     ) -> dict:
         findings = graph.get_findings()
 
@@ -51,7 +67,9 @@ class ReportingAgent:
         }
 
         executive_summary = await self._generate_executive_summary(report_context, ledger)
-        technical_findings = await self._generate_technical_findings(findings, graph, phase_results, ledger)
+        deterministic_technical_findings = self._deterministic_technical_findings(deterministic_findings or [])
+        llm_technical_findings = await self._generate_technical_findings(findings, graph, phase_results, ledger)
+        technical_findings = deterministic_technical_findings + llm_technical_findings
 
         report = {
             "executive_summary": executive_summary,
@@ -72,7 +90,7 @@ class ReportingAgent:
             "Return keys: risk_overview, key_findings, business_impact, immediate_actions.\n"
             f"Context:\n{json.dumps(report_context, indent=2)}"
         )
-        if not self._charge(ledger, "reporting_agent", prompt):
+        if not charge_ledger(ledger, "reporting_agent", prompt):
             return self._executive_fallback(report_context)
 
         raw = await self.ai_client.query_with_retry(
@@ -80,7 +98,7 @@ class ReportingAgent:
             persona=AIPersona.SECURITY_REPORTER,
             max_retries=2,
         )
-        payload = self._unpack_query_result(raw)
+        payload = unpack_query_result(raw)
         if isinstance(payload, dict):
             return payload
         return self._executive_fallback(report_context)
@@ -98,11 +116,16 @@ class ReportingAgent:
             chain = [n.to_dict() for n in graph.get_path_to_root(finding.id)]
 
             auth_required = bool(phase_results.get("auth_required", False))
+            finding_injection = finding.data.get("injection_point", {})
+            finding_url = str(finding_injection.get("url", "")) if isinstance(finding_injection, dict) else ""
+            page_classifications = phase_results.get("reconnaissance", {}).get("page_classifications", {})
+            page_classification = page_classifications.get(finding_url, "general") if isinstance(page_classifications, dict) else "general"
             vector, score = self.compute_cvss(
                 owasp_category=finding.data.get("owasp_category", ""),
                 proof_type=finding.data.get("exploitation_evidence", {}).get("proof_type", ""),
                 exploitation_confirmed=bool(finding.data.get("exploitation_evidence")),
                 auth_required=auth_required,
+                page_classification=page_classification,
             )
 
             if ledger.is_critical():
@@ -115,20 +138,29 @@ class ReportingAgent:
                 f"Finding data:\n{json.dumps(finding.data, indent=2)}\n\n"
                 f"Reasoning chain:\n{json.dumps(chain, indent=2)}\n"
             )
-            if not self._charge(ledger, "reporting_agent", prompt):
+            if not charge_ledger(ledger, "reporting_agent", prompt):
                 out.extend(self._technical_fallback(f, [n.to_dict() for n in graph.get_path_to_root(f.id)], *self.compute_cvss(
                     owasp_category=f.data.get("owasp_category", ""),
                     proof_type=f.data.get("exploitation_evidence", {}).get("proof_type", ""),
                     exploitation_confirmed=bool(f.data.get("exploitation_evidence")),
                     auth_required=auth_required,
+                    page_classification=(
+                        phase_results.get("reconnaissance", {})
+                        .get("page_classifications", {})
+                        .get(str((f.data.get("injection_point", {}) or {}).get("url", "")), "general")
+                        if isinstance(phase_results.get("reconnaissance", {}).get("page_classifications", {}), dict)
+                        else "general"
+                    ),
                 )) for f in findings[idx:])
                 break
 
             raw = await self.ai_client.query_with_retry(prompt, persona=AIPersona.SECURITY_REPORTER, max_retries=2)
-            payload = self._unpack_query_result(raw)
+            payload = unpack_query_result(raw)
             if isinstance(payload, dict):
                 payload.setdefault("cvss_vector", vector)
                 payload.setdefault("cvss_score", score)
+                owasp = finding.data.get("owasp_category", "")
+                payload["cwe"] = _OWASP_TO_CWE.get(owasp, "CWE-unknown")
                 http_conf = finding.data.get("http_confirmation") if isinstance(finding.data, dict) else None
                 if isinstance(http_conf, dict):
                     payload["http_confirmation"] = {
@@ -153,6 +185,52 @@ class ReportingAgent:
 
         return out
 
+    def _deterministic_technical_findings(self, deterministic_findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for finding in deterministic_findings:
+            if not isinstance(finding, dict):
+                continue
+            risk_level = str(finding.get("risk_level", "Low"))
+            score = self._risk_level_score(risk_level)
+            vector = self._risk_level_vector(risk_level)
+            evidence = str(finding.get("evidence", ""))
+            out.append(
+                {
+                    "vulnerability_name": finding.get("vulnerability_name", "Deterministic finding"),
+                    "owasp_category": finding.get("owasp_category", "Unknown"),
+                    "cwe": finding.get("cwe", ""),
+                    "risk_level": risk_level,
+                    "description": evidence,
+                    "proof_of_concept": f"Deterministic check: {evidence}",
+                    "remediation": finding.get("remediation", ""),
+                    "deterministic": True,
+                    "cvss_vector": vector,
+                    "cvss_score": score,
+                }
+            )
+        return out
+
+    @staticmethod
+    def _risk_level_score(risk_level: str) -> float:
+        mapping = {
+            "critical": 9.0,
+            "high": 7.5,
+            "medium": 5.0,
+            "low": 3.0,
+        }
+        return mapping.get((risk_level or "").strip().lower(), 3.0)
+
+    @staticmethod
+    def _risk_level_vector(risk_level: str) -> str:
+        key = (risk_level or "").strip().lower()
+        if key == "critical":
+            return "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H"
+        if key == "high":
+            return "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"
+        if key == "medium":
+            return "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:L/I:L/A:L"
+        return "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:L/I:N/A:N"
+
     def _technical_fallback(self, finding: Node, chain: list[dict[str, Any]], vector: str, score: float) -> dict[str, Any]:
         probes = [n.get("data", {}).get("probe") for n in chain if n.get("type") == "probe" and n.get("data", {}).get("probe")]
         poc = (
@@ -162,6 +240,7 @@ class ReportingAgent:
         return {
             "vulnerability_name": finding.data.get("hypothesis", "Unknown finding"),
             "owasp_category": finding.data.get("owasp_category", "Unknown"),
+            "cwe": _OWASP_TO_CWE.get(finding.data.get("owasp_category", ""), "CWE-unknown"),
             "cvss_vector": vector,
             "cvss_score": score,
             "description": finding.data.get("hypothesis", ""),
@@ -182,25 +261,6 @@ class ReportingAgent:
             "immediate_actions": ["Patch vulnerable components", "Restrict attack surface", "Re-test after remediation"],
         }
 
-    @staticmethod
-    def _charge(ledger: TokenLedger, component: str, prompt: str) -> bool:
-        t = estimate_tokens(prompt)
-        try:
-            return bool(ledger.charge(t, component=component))
-        except TypeError:
-            return bool(ledger.charge(component, t))
-
-    @staticmethod
-    def _unpack_query_result(raw: Any) -> Any | None:
-        if raw is None:
-            return None
-        if isinstance(raw, tuple) and len(raw) == 2:
-            payload, err = raw
-            if err:
-                return None
-            return payload
-        return raw
-
     def compute_cvss(
         self,
         *,
@@ -208,10 +268,16 @@ class ReportingAgent:
         proof_type: str,
         exploitation_confirmed: bool,
         auth_required: bool,
+        page_classification: str = "general",
     ) -> tuple[str, float]:
         av = "N"
         ac = "L" if exploitation_confirmed else "H"
-        pr = "L" if auth_required else "N"
+        if page_classification == "admin_page":
+            pr = "H"
+        elif auth_required:
+            pr = "L"
+        else:
+            pr = "N"
 
         category = (owasp_category or "").lower()
         if "xss" in category or "a03" in category:
@@ -219,12 +285,8 @@ class ReportingAgent:
         else:
             ui = "N"
 
-        if proof_type in {"rce", "time_based"}:
+        if proof_type == "rce":
             s = "C"
-        elif proof_type == "data_extracted":
-            s = "U"
-        elif proof_type == "error_based":
-            s = "U"
         else:
             s = "U"
 

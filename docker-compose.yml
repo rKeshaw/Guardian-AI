@@ -53,12 +53,12 @@ services:
         condition: service_healthy
     entrypoint: >
       sh -c "
-        MODEL=${OLLAMA_MODEL:-mixtral:latest} &&
-        echo 'Pulling primary model: '$MODEL &&
-        OLLAMA_HOST=http://ollama:11434 ollama pull $MODEL &&
-        FAST_MODEL=${OLLAMA_MODEL_FAST:-ollama3:latest} &&
-        echo 'Pulling fast model: '$FAST_MODEL &&
-        OLLAMA_HOST=http://ollama:11434 ollama pull $FAST_MODEL &&
+        MODEL=$${OLLAMA_MODEL:-mixtral:latest} &&
+        echo 'Pulling primary model: '$$MODEL &&
+        OLLAMA_HOST=http://ollama:11434 ollama pull $$MODEL &&
+        FAST_MODEL=$${OLLAMA_MODEL_FAST:-ollama3:latest} &&
+        echo 'Pulling fast model: '$$FAST_MODEL &&
+        OLLAMA_HOST=http://ollama:11434 ollama pull $$FAST_MODEL &&
         echo 'Model pull complete.'
       "
     environment:

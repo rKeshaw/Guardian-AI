@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from guardian.core.ai_client import AIPersona, estimate_tokens
 from guardian.core.graph.attack_graph import AttackGraph, Node, NodeType
 from guardian.core.token_ledger import TokenLedger
+from guardian.core.utils import charge_ledger, unpack_query_result
 from guardian.models.hypothesis import HypothesisSchema
 
 logger = logging.getLogger(__name__)
@@ -228,7 +229,7 @@ class HypothesisAgent:
     ) -> list[Node]:
         prompt = self._build_generation_prompt(target_model)
 
-        if not self._charge_ledger(ledger, "hypothesis_engine", prompt):
+        if not charge_ledger(ledger, "hypothesis_engine", prompt):
             logger.warning("Token budget exhausted before hypothesis generation.")
             return []
 
@@ -239,7 +240,7 @@ class HypothesisAgent:
             max_retries=2,
         )
 
-        initial_payload = self._unpack_query_result(raw_first)
+        initial_payload = unpack_query_result(raw_first)
         if initial_payload is None:
             logger.warning("Hypothesis generation returned no payload.")
             return []
@@ -432,7 +433,7 @@ class HypothesisAgent:
             f"Current list:\n{json.dumps(hypotheses, indent=2)}"
         )
 
-        if not self._charge_ledger(ledger, "hypothesis_engine", review_prompt):
+        if not charge_ledger(ledger, "hypothesis_engine", review_prompt):
             logger.warning("Token budget exhausted before self-review pass.")
             return hypotheses
 
@@ -441,7 +442,7 @@ class HypothesisAgent:
             persona=persona,
             max_retries=2,
         )
-        review_payload = self._unpack_query_result(raw_review)
+        review_payload = unpack_query_result(raw_review)
         if not isinstance(review_payload, dict):
             return hypotheses
 
@@ -539,27 +540,3 @@ class HypothesisAgent:
             token_estimate=token_est,
             compressed_summary=hypothesis_dict,
         )
-
-    def _charge_ledger(self, ledger: TokenLedger, component: str, prompt: str) -> bool:
-        tokens = estimate_tokens(prompt)
-
-        # Preferred signature in this codebase: charge(amount, component="...")
-        try:
-            return bool(ledger.charge(tokens, component=component))
-        except TypeError:
-            # Compatibility fallback for alternate signature: charge(component, amount)
-            return bool(ledger.charge(component, tokens))
-
-    @staticmethod
-    def _unpack_query_result(raw_result: Any) -> Any | None:
-        if raw_result is None:
-            return None
-
-        if isinstance(raw_result, tuple) and len(raw_result) == 2:
-            parsed, err = raw_result
-            if err:
-                logger.warning("LLM query_with_retry returned error: %s", err)
-                return None
-            return parsed
-
-        return raw_result

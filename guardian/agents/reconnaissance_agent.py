@@ -41,6 +41,17 @@ _WAF_SIGNATURES: list[tuple[str, str, str]] = [
     ("server", "cloudflare", "cloudflare"),
     ("x-cdn", "", "cdn_waf"),
     ("cf-ray", "", "cloudflare"),
+    ("x-cache", "sucuri", "sucuri"),
+    ("x-protected-by", "", "generic_waf"),
+    ("x-waf-event-info", "", "barracuda"),
+    ("x-distil-cs", "", "distil"),
+    ("x-akamai-transformed", "", "akamai"),
+    ("server", "akamaighost", "akamai"),
+    ("x-fw-hash", "", "fortiweb"),
+    ("x-sucuri-cache", "", "sucuri"),
+    ("x-cache-hits", "", "varnish_cdn"),
+    ("server", "awselb", "aws_waf"),
+    ("x-amzn-requestid", "", "aws_waf"),
 ]
 
 
@@ -84,13 +95,15 @@ class ReconnaissanceAgent:
             common_task = self._check_common_paths(target_url, session)
             port_task = self._port_scan(parsed.netloc)
             subdomain_task = self._enumerate_subdomains(parsed.netloc)
+            cors_task = self._check_cors_misconfiguration(target_url, session)
 
-            fingerprint, crawled, common_paths, open_ports, subdomains = await asyncio.gather(
+            fingerprint, crawled, common_paths, open_ports, subdomains, cors_signals = await asyncio.gather(
                 fp_task,
                 crawl_task,
                 common_task,
                 port_task,
                 subdomain_task,
+                cors_task,
             )
 
             js_analysis = await self._fetch_and_analyze_javascript(
@@ -109,6 +122,7 @@ class ReconnaissanceAgent:
         api_endpoints = sorted(
             set(crawled.get("endpoints", []))
             | set(common_paths.get("openapi_endpoints", []))
+            | set(common_paths.get("sitemap_urls", []))
             | set(js_analysis.get("api_paths", []))
             | set(js_analysis.get("fetch_endpoints", []))
         )
@@ -128,6 +142,10 @@ class ReconnaissanceAgent:
             js_analysis=js_analysis,
             database_hint=database_hint,
         )
+        attack_surface_signals.extend(fingerprint.get("security_header_signals", []))
+        attack_surface_signals.extend(fingerprint.get("cookie_security_signals", []))
+        attack_surface_signals.extend(cors_signals)
+        attack_surface_signals = list(dict.fromkeys(attack_surface_signals))
 
         model = TargetModel(
             url=target_url,
@@ -173,10 +191,14 @@ class ReconnaissanceAgent:
         headers_out: dict[str, str] = {}
         body_technologies: list[str] = []
         waf_detected: str | None = None
+        security_header_signals: list[str] = []
+        cookie_security_signals: list[str] = []
 
         try:
             async with session.get(url) as resp:
                 text = await resp.text(errors="replace")
+                response_headers = {str(k): str(v) for k, v in resp.headers.items()}
+                headers_out.update(response_headers)
                 for key in ["Server", "X-Powered-By", "X-AspNet-Version", "X-Generator", "X-Framework"]:
                     if key in resp.headers:
                         headers_out[key] = resp.headers[key]
@@ -188,6 +210,9 @@ class ReconnaissanceAgent:
                             waf_detected = waf_name
                             break
 
+                security_header_signals = self._analyze_security_headers(response_headers, url)
+                cookie_security_signals = self._analyze_cookies(response_headers, url)
+
                 body_l = text.lower()
                 for tech, indicators in _TECH_INDICATORS.items():
                     if any(ind.lower() in body_l for ind in indicators):
@@ -195,42 +220,78 @@ class ReconnaissanceAgent:
         except Exception as exc:
             logger.warning("Technology fingerprint failed for %s: %s", url, exc)
 
-        if not waf_detected:
-            try:
-                probe_url = f"{url}?guardian_waf_probe=<script>alert(1)</script>"
-                async with session.get(probe_url) as resp:
-                    probe_body = (await resp.text(errors="replace")).lower()
-                    location = (resp.headers.get("Location") or resp.headers.get("location") or "").lower()
-
-                    if resp.status in (403, 406):
-                        waf_detected = "behavioral_waf_detected"
-                        logger.info("Behavioral WAF detected via status probe for %s", url)
-                    elif any(
-                        key in probe_body
-                        for key in [
-                            "blocked",
-                            "forbidden",
-                            "security",
-                            "firewall",
-                            "protection",
-                            "access denied",
-                            "request rejected",
-                            "mod_security",
-                        ]
-                    ):
-                        waf_detected = "behavioral_waf_detected"
-                        logger.info("Behavioral WAF detected via response-body probe for %s", url)
-                    elif resp.status == 302 and any(key in location for key in ["captcha", "challenge"]):
-                        waf_detected = "captcha_waf_detected"
-                        logger.info("Behavioral WAF challenge detected for %s", url)
-            except Exception as exc:
-                logger.debug("Behavioral WAF probe failed for %s: %s", url, exc)
-
         return {
             "headers": headers_out,
             "body_technologies": sorted(set(body_technologies)),
             "waf_detected": waf_detected,
+            "security_header_signals": security_header_signals,
+            "cookie_security_signals": cookie_security_signals,
         }
+
+    def _analyze_security_headers(self, headers: dict[str, str], url: str) -> list[str]:
+        signals = []
+        header_keys_lower = {k.lower() for k in headers}
+
+        security_headers = {
+            "content-security-policy": "Missing Content-Security-Policy header — XSS and injection risk (A05:2023)",
+            "x-frame-options": "Missing X-Frame-Options header — clickjacking risk (A05:2023)",
+            "strict-transport-security": "Missing HSTS header — downgrade attack risk (A02:2023)",
+            "x-content-type-options": "Missing X-Content-Type-Options header — MIME sniffing risk (A05:2023)",
+            "referrer-policy": "Missing Referrer-Policy header — information leakage risk (A05:2023)",
+            "permissions-policy": "Missing Permissions-Policy header (A05:2023)",
+        }
+        for header, message in security_headers.items():
+            if header not in header_keys_lower:
+                signals.append(message)
+
+        csp = headers.get("Content-Security-Policy", headers.get("content-security-policy", ""))
+        if csp and "unsafe-inline" in csp:
+            signals.append("Content-Security-Policy contains unsafe-inline — CSP bypass possible (A05:2023)")
+        if csp and "unsafe-eval" in csp:
+            signals.append("Content-Security-Policy contains unsafe-eval — CSP bypass possible (A05:2023)")
+
+        return signals
+
+    def _analyze_cookies(self, response_headers: dict, url: str) -> list[str]:
+        signals = []
+        is_https = url.startswith("https://")
+        set_cookie_headers = []
+        for k, v in response_headers.items():
+            if k.lower() == "set-cookie":
+                set_cookie_headers.append(v)
+
+        for cookie in set_cookie_headers:
+            cookie_lower = cookie.lower()
+            cookie_name = cookie.split("=")[0].strip()
+
+            if "httponly" not in cookie_lower:
+                signals.append(f"Cookie '{cookie_name}' missing HttpOnly flag — XSS cookie theft risk (A07:2023)")
+            if is_https and "secure" not in cookie_lower:
+                signals.append(f"Cookie '{cookie_name}' missing Secure flag on HTTPS endpoint (A02:2023)")
+            if "samesite" not in cookie_lower:
+                signals.append(f"Cookie '{cookie_name}' missing SameSite attribute — CSRF risk (A01:2023)")
+
+        return signals[:10]
+
+    async def _check_cors_misconfiguration(self, url: str, session: aiohttp.ClientSession) -> list[str]:
+        signals = []
+        try:
+            async with session.options(url, headers={
+                "Origin": "https://evil-attacker.com",
+                "Access-Control-Request-Method": "GET",
+            }) as resp:
+                acao = resp.headers.get("Access-Control-Allow-Origin", "")
+                acac = resp.headers.get("Access-Control-Allow-Credentials", "")
+
+                if acao == "*":
+                    signals.append("CORS wildcard origin (*) — any site can read responses (A05:2023)")
+                elif "evil-attacker.com" in acao:
+                    signals.append("CORS reflects arbitrary Origin — any site can read responses (A05:2023)")
+                    if acac.lower() == "true":
+                        signals.append("CORS reflects Origin with Allow-Credentials:true — authenticated CORS attack possible (A05:2023) CRITICAL")
+        except Exception:
+            pass
+        return signals
 
     async def _crawl_and_extract(self, url: str, session: aiohttp.ClientSession, depth: int) -> dict:
         parsed_root = urlparse(url)
@@ -296,6 +357,16 @@ class ReconnaissanceAgent:
             "page_bodies": page_bodies,
         }
 
+    def _shannon_entropy(self, s: str) -> float:
+        from collections import Counter
+        from math import log2
+
+        if not s:
+            return 0.0
+        counts = Counter(s)
+        total = len(s)
+        return -sum((c / total) * log2(c / total) for c in counts.values())
+
     async def _fetch_and_analyze_javascript(
         self,
         script_urls: list[str],
@@ -323,6 +394,11 @@ class ReconnaissanceAgent:
             api_paths.update(api_path_re.findall(content))
             hardcoded_secrets.update(aws_re.findall(content))
             hardcoded_secrets.update(secret_re.findall(content))
+            filtered_secrets = set()
+            for candidate in hardcoded_secrets:
+                if self._shannon_entropy(candidate) > 3.5 and len(candidate) >= 12:
+                    filtered_secrets.add(candidate)
+            hardcoded_secrets = filtered_secrets
 
             for endpoint in fetch_re.findall(content) + axios_re.findall(content):
                 if endpoint.startswith("/"):
@@ -354,6 +430,7 @@ class ReconnaissanceAgent:
         ]
         found_paths: dict[str, int] = {}
         openapi_endpoints: set[str] = set()
+        sitemap_urls: set[str] = set()
         graphql_available = False
 
         for path in common:
@@ -382,10 +459,30 @@ class ReconnaissanceAgent:
             if status == 200:
                 found_paths[path] = status
 
-            if path in {"/robots.txt", "/sitemap.xml"} and status == 200:
+            if path == "/robots.txt" and status == 200:
                 try:
                     async with session.get(full) as resp:
-                        _ = await resp.text(errors="replace")
+                        robots_text = await resp.text(errors="replace")
+                    disallowed_paths = []
+                    for line in robots_text.splitlines():
+                        line = line.strip()
+                        if line.lower().startswith("disallow:"):
+                            dp = line.split(":", 1)[1].strip()
+                            if dp and dp != "/":
+                                disallowed_paths.append(dp)
+                    for dp in disallowed_paths[:20]:
+                        found_paths[f"robots_disallowed:{dp}"] = 200
+                except Exception:
+                    pass
+
+            if path == "/sitemap.xml" and status == 200:
+                try:
+                    async with session.get(full) as resp:
+                        sitemap_text = await resp.text(errors="replace")
+                    import re as _re
+
+                    for loc in _re.findall(r"<loc>\s*(https?://[^\s<]+)\s*</loc>", sitemap_text):
+                        sitemap_urls.add(loc)
                 except Exception:
                     pass
 
@@ -410,6 +507,7 @@ class ReconnaissanceAgent:
             "found_paths": found_paths,
             "openapi_endpoints": sorted(openapi_endpoints),
             "graphql_available": graphql_available,
+            "sitemap_urls": sorted(sitemap_urls)[:50],
         }
 
     async def _port_scan(self, domain: str) -> list[dict]:
