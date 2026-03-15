@@ -6,7 +6,7 @@ uvicorn[standard]==0.27.1
 python-multipart==0.0.9
 
 # ── HTTP / async networking ───────────────────
-aiohttp==3.9.3
+aiohttp==3.13.3
 aiofiles==23.2.1
 requests==2.31.0          # used in legacy/util paths only; primary HTTP is aiohttp
 
