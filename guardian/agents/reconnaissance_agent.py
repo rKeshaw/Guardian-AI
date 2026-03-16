@@ -222,7 +222,8 @@ class ReconnaissanceAgent:
 
         if waf_detected is None:
             try:
-                sep = "&" if "?" in url else "?"
+                parsed = urlparse(url)
+                sep = "&" if parsed.query else "?"
                 probe_url = f"{url}{sep}guardian_waf_probe=<script>alert(1)</script>"
                 async with session.get(probe_url) as probe_resp:
                     if probe_resp.status == 403:
