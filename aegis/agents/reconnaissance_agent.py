@@ -702,8 +702,12 @@ class ReconnaissanceAgent:
             if base_domain.count(":") == 1:
                 base_domain = base_domain.split(":", 1)[0]
 
-            wordlist_path = Path(__file__).resolve().parent.parent / "data" / "subdomain_wordlist.txt"
-            if not wordlist_path.exists():
+            wordlist_candidates = [
+                Path(__file__).resolve().parent.parent / "data" / "subdomain_wordlist.txt",
+                Path(__file__).resolve().parent / "subdomain_wordlist.txt",
+            ]
+            wordlist_path = next((p for p in wordlist_candidates if p.exists()), None)
+            if wordlist_path is None:
                 return []
 
             words: list[str] = []
