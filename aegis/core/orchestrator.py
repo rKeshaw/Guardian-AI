@@ -596,7 +596,15 @@ class CentralOrchestrator:
         for node in nodes:
             ctx.graph.add_node(node)
             if hasattr(self.db, "upsert_node"):
-                await self.db.upsert_node(ctx.graph.graph_id, node.to_dict())
+                try:
+                    await self.db.upsert_node(ctx.graph.graph_id, node.to_dict())
+                except Exception as exc:
+                    logger.debug(
+                        "Skipping hypothesis node persistence during seeding graph_id=%s node_id=%s error=%s",
+                        ctx.graph.graph_id,
+                        node.id,
+                        exc,
+                    )
 
         seeded_from_vuln = 0
         if settings.ENABLE_VULN_ANALYSIS_SEEDING and ctx.phase_results.get("vulnerability_analysis") is not None:
