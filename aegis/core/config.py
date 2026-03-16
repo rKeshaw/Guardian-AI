@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     ENABLE_ACTIVE_CONFIRMATION: bool = True
     ENABLE_PAYLOAD_GENERATION: bool = True
     ENABLE_ACTIVE_PENETRATION: bool = True
+    ENABLE_LLM_JUDGE: bool = True
     SCAN_EXECUTION_PROFILE: str = "aggressive"  # legacy | safe | balanced | aggressive
 
     # ── Reserved / currently unused — planned for future features ─

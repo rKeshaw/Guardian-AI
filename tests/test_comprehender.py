@@ -1,4 +1,5 @@
 from aegis.core.intelligence.comprehender import Comprehender
+import pytest
 
 
 def _facts(comp):
@@ -91,3 +92,26 @@ def test_normalize_probe_path_traversal_semantic_equivalence():
 def test_normalize_probe_xss_script_semantic_equivalence():
     comprehender = Comprehender()
     assert comprehender._normalize_probe("<script>alert(1)</script>") == comprehender._normalize_probe("<script>alert(2)</script>")
+
+
+@pytest.mark.anyio
+async def test_is_near_duplicate_fallback_normalized(monkeypatch):
+    comprehender = Comprehender()
+    monkeypatch.setattr(comprehender, "_get_embedding_model", lambda: None)
+    assert await comprehender.is_near_duplicate("' OR 1=1--", {"' OR 2=2--"}) is True
+
+
+@pytest.mark.anyio
+async def test_is_near_duplicate_embedding_based(monkeypatch):
+    comprehender = Comprehender()
+
+    class _Model:
+        def encode(self, texts, convert_to_numpy=True):
+            text = texts[0]
+            if "very similar" in text:
+                return [[1.0, 0.0, 0.0]]
+            return [[0.0, 1.0, 0.0]]
+
+    monkeypatch.setattr(comprehender, "_get_embedding_model", lambda: _Model())
+    assert await comprehender.is_near_duplicate("very similar probe", {"very similar payload"}) is True
+    assert await comprehender.is_near_duplicate("different probe", {"very similar payload"}) is False

@@ -86,6 +86,7 @@ class ReasoningAgent:
 
         for turn in range(max_turns):
             if await self.comprehender.is_near_duplicate(current_probe, memory._tried_probes):
+                logger.info("semantic_duplicate_probe_skipped hypothesis=%s probe=%r", hypothesis_node.id, current_probe)
                 duplicate_override = {
                     "role": "system_override",
                     "message": (
@@ -118,6 +119,7 @@ class ReasoningAgent:
                     current_probe = None
                     break
                 if await self.comprehender.is_near_duplicate(next_candidate, memory._tried_probes):
+                    logger.info("semantic_duplicate_probe_skipped hypothesis=%s probe=%r", hypothesis_node.id, next_candidate)
                     current_probe = None
                     break
                 current_probe = next_candidate

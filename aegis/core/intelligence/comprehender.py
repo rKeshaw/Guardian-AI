@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import math
 import re
 from dataclasses import dataclass
 from html import unescape
@@ -7,6 +9,8 @@ from urllib.parse import unquote
 
 from aegis.core.ai_client import estimate_tokens
 from aegis.core.memory.semantic_unit import SemanticUnit
+
+logger = logging.getLogger(__name__)
 
 
 JWT_RE = re.compile(r"\beyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\b")
@@ -20,6 +24,12 @@ class ComprehensionResult:
 
 
 class Comprehender:
+    def __init__(self) -> None:
+        self._embedding_model = None
+        self._embedding_model_checked = False
+        self._embedding_cache: dict[str, list[float]] = {}
+        self._embedding_warning_emitted = False
+
     def compress(self, content: str, source: str, probe_sent: str | None = None) -> dict:
         text = content or ""
         cleaned = self._strip_boilerplate(text)
@@ -62,9 +72,59 @@ class Comprehender:
         return unit
 
     async def is_near_duplicate(self, probe: str, tried_probes: set[str]) -> bool:
+        model = self._get_embedding_model()
+        if model is not None:
+            return self._is_semantic_duplicate(probe, tried_probes, model)
+
+        if not self._embedding_warning_emitted:
+            logger.warning("sentence_transformers_unavailable_fallback_to_normalized_dedup")
+            self._embedding_warning_emitted = True
         normalized = self._normalize_probe(probe)
         normalized_tried = {self._normalize_probe(p) for p in tried_probes}
         return normalized in normalized_tried
+
+    def _get_embedding_model(self):
+        if self._embedding_model_checked:
+            return self._embedding_model
+        self._embedding_model_checked = True
+        try:
+            from sentence_transformers import SentenceTransformer  # type: ignore
+
+            self._embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+        except Exception:
+            self._embedding_model = None
+        return self._embedding_model
+
+    def _embed(self, text: str, model) -> list[float]:
+        key = text or ""
+        if key in self._embedding_cache:
+            return self._embedding_cache[key]
+        vector = model.encode([key], convert_to_numpy=True)[0]
+        out = [float(v) for v in (vector.tolist() if hasattr(vector, "tolist") else vector)]
+        self._embedding_cache[key] = out
+        return out
+
+    @staticmethod
+    def _cosine_similarity(a: list[float], b: list[float]) -> float:
+        if not a or not b or len(a) != len(b):
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        mag_a = math.sqrt(sum(x * x for x in a))
+        mag_b = math.sqrt(sum(y * y for y in b))
+        if mag_a == 0.0 or mag_b == 0.0:
+            return 0.0
+        return dot / (mag_a * mag_b)
+
+    def _is_semantic_duplicate(self, probe: str, tried_probes: set[str], model) -> bool:
+        if not probe or not tried_probes:
+            return False
+        probe_vec = self._embed(probe, model)
+        max_sim = 0.0
+        for tried in tried_probes:
+            sim = self._cosine_similarity(probe_vec, self._embed(tried, model))
+            if sim > max_sim:
+                max_sim = sim
+        return max_sim > 0.92
 
     def _extract_facts(self, text: str, probe_sent: str | None = None) -> list[str]:
         facts: list[str] = []

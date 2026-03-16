@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from difflib import SequenceMatcher
 
+from aegis.core.ai_client import AIPersona
 from aegis.core.memory.conversation_memory import ConversationMemory
+from aegis.core.utils import charge_ledger, unpack_query_result
 
 
 class QualityMonitor:
@@ -68,4 +71,51 @@ class QualityMonitor:
             "quality_ok": len(issues) == 0,
             "issues": issues,
             "recovery_message": recovery_message,
+        }
+
+    async def judge_finding(self, finding: dict, ai_client, ledger) -> dict:
+        default = {
+            "verdict": "uncertain",
+            "confidence_adjustment": -0.2,
+            "reasoning": "Judge unavailable; defaulted to uncertain.",
+        }
+        hypothesis = str(finding.get("hypothesis", ""))
+        probe_sent = str((finding.get("exploitation_evidence") or {}).get("payload_used", finding.get("probe_sent", "")))
+        raw_snippet = str(finding.get("raw_response_snippet", finding.get("response_snippet", "")))[:700]
+        extracted_facts = finding.get("confirmed_facts", [])
+        owasp_category = str(finding.get("owasp_category", "unknown"))
+
+        prompt = (
+            "You are validating a claimed web vulnerability finding.\n"
+            "Return JSON with keys: verdict, confidence_adjustment, reasoning.\n"
+            "verdict must be one of: confirmed, uncertain, false_positive.\n\n"
+            f"Hypothesis: {hypothesis}\n"
+            f"Probe sent: {probe_sent}\n"
+            f"Raw server response snippet: {raw_snippet}\n"
+            f"Extracted facts: {json.dumps(extracted_facts, ensure_ascii=False)}\n"
+            f"Claimed OWASP category: {owasp_category}\n\n"
+            "Evaluate: Is evidence sufficient to confirm the finding? Could this be false positive? "
+            "Which indicator was decisive?"
+        )
+
+        if ledger is not None and not charge_ledger(ledger, "quality_monitor_judge", prompt):
+            return default
+
+        raw = await ai_client.query_with_retry(prompt, persona=AIPersona.QUALITY_MONITOR, max_retries=2)
+        payload = unpack_query_result(raw)
+        if not isinstance(payload, dict):
+            return default
+
+        verdict = str(payload.get("verdict", "uncertain")).strip().lower()
+        if verdict not in {"confirmed", "uncertain", "false_positive"}:
+            verdict = "uncertain"
+        adjustment = payload.get("confidence_adjustment")
+        try:
+            confidence_adjustment = float(adjustment)
+        except Exception:
+            confidence_adjustment = 0.1 if verdict == "confirmed" else (-0.2 if verdict == "uncertain" else -1.0)
+        return {
+            "verdict": verdict,
+            "confidence_adjustment": confidence_adjustment,
+            "reasoning": str(payload.get("reasoning", "")),
         }

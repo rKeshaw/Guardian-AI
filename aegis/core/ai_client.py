@@ -30,6 +30,7 @@ class AIPersona(Enum):
     PAYLOAD_GENERATOR = "payload_generator"
     PENETRATION_TESTER = "penetration_tester"
     SECURITY_REPORTER = "security_reporter"
+    QUALITY_MONITOR = "quality_monitor"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -492,6 +493,15 @@ class AIClient:
                 ),
                 "temperature": 0.2,
                 "top_p": 0.7,
+            },
+            AIPersona.QUALITY_MONITOR.value: {
+                "system_prompt": (
+                    'You are "EvidenceJudge", a strict security findings quality reviewer. '
+                    "Assess whether evidence actually confirms the claimed vulnerability. "
+                    "Prefer precision over optimism and clearly call out false positives."
+                ),
+                "temperature": 0.1,
+                "top_p": 0.6,
             },
         }
 

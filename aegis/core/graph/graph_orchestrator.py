@@ -9,6 +9,7 @@ from aegis.core.ai_client import AIPersona, estimate_tokens
 from aegis.core.config import settings
 from aegis.core.graph.attack_graph import AttackGraph, Edge, EdgeType, Node, NodeType
 from aegis.core.graph.priority_queue import HypothesisPriorityQueue
+from aegis.core.intelligence.quality_monitor import QualityMonitor
 from aegis.core.token_ledger import TokenLedger
 from aegis.core.utils import charge_ledger, unpack_query_result
 
@@ -26,6 +27,7 @@ class GraphOrchestrator:
         self.comprehender = comprehender
         self.db = db
         self._priority_queue: HypothesisPriorityQueue | None = None
+        self._quality_monitor = QualityMonitor()
 
     async def run(
         self,
@@ -91,6 +93,44 @@ class GraphOrchestrator:
             hypothesis_budget.release()
 
             if finding is not None:
+                judge = {"verdict": "confirmed", "confidence_adjustment": 0.1, "reasoning": "judge disabled"}
+                if settings.ENABLE_LLM_JUDGE:
+                    try:
+                        judge = await self._quality_monitor.judge_finding(finding.data, self.ai_client, ledger)
+                    except Exception as exc:
+                        logger.warning("llm_judge_failed finding_id=%s error=%s", finding.id, exc)
+
+                verdict = str(judge.get("verdict", "confirmed")).lower()
+                adjustment = float(judge.get("confidence_adjustment", 0.0))
+                if verdict == "false_positive":
+                    self._remove_finding_from_graph(graph, finding.id)
+                    if hypothesis_node.id in graph.nodes:
+                        graph.nodes[hypothesis_node.id].type = NodeType.DEAD_END
+                        graph.frontier = [nid for nid in graph.frontier if nid != hypothesis_node.id]
+                    persisted_ids.discard(finding.id)
+                    persisted_ids.discard(hypothesis_node.id)
+                    self._publish(event_queue, {"event": "hypothesis_dead", "data": {"id": hypothesis_node.id, "reason": "llm_judge_false_positive"}})
+                    continue
+                if verdict == "uncertain":
+                    self._remove_finding_from_graph(graph, finding.id)
+                    if hypothesis_node.id in graph.nodes:
+                        if hypothesis_node.data.get("judge_requeued_once"):
+                            graph.nodes[hypothesis_node.id].type = NodeType.DEAD_END
+                            graph.frontier = [nid for nid in graph.frontier if nid != hypothesis_node.id]
+                        else:
+                            hypothesis_node.data["judge_requeued_once"] = True
+                            graph.nodes[hypothesis_node.id].type = NodeType.HYPOTHESIS
+                            graph.nodes[hypothesis_node.id].confidence = max(0.0, min(1.0, graph.nodes[hypothesis_node.id].confidence + adjustment))
+                            if hypothesis_node.id not in graph.frontier:
+                                graph.frontier.append(hypothesis_node.id)
+                    persisted_ids.discard(finding.id)
+                    persisted_ids.discard(hypothesis_node.id)
+                    self._publish(event_queue, {"event": "hypothesis_requeued", "data": {"id": hypothesis_node.id, "reason": "llm_judge_uncertain"}})
+                    continue
+
+                finding.confidence = max(0.0, min(1.0, finding.confidence + adjustment))
+                if finding.id in graph.nodes:
+                    graph.nodes[finding.id].confidence = finding.confidence
                 try:
                     graph.resolve_hypothesis(hypothesis_node.id, NodeType.FINDING)
                 except Exception:
@@ -271,3 +311,8 @@ class GraphOrchestrator:
             event_queue.put_nowait({**event, "timestamp": datetime.now(timezone.utc).isoformat()})
         except Exception:
             pass
+
+    @staticmethod
+    def _remove_finding_from_graph(graph: AttackGraph, finding_id: str) -> None:
+        graph.nodes.pop(finding_id, None)
+        graph.edges = [e for e in graph.edges if e.source_id != finding_id and e.target_id != finding_id]
