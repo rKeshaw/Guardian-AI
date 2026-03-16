@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -15,7 +15,7 @@ def render_html_report(session_id: str, results: list[dict]) -> str:
     exec_summary = report_data.get("executive_summary", {})
     tech_findings = report_data.get("technical_findings", [])
     scan_meta = report_data.get("scan_metadata", {})
-    generated_at = report_data.get("generated_at", datetime.utcnow().isoformat())
+    generated_at = report_data.get("generated_at", datetime.now(timezone.utc).isoformat())
 
     severity_colors = {"Critical": "#dc2626", "High": "#ea580c", "Medium": "#ca8a04", "Low": "#16a34a"}
 

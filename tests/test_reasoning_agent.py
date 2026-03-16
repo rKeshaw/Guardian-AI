@@ -114,7 +114,12 @@ async def test_terminal_finding_creates_finding_node():
         "exploitation_confirmed": True,
         "confidence": 95,
         "next_probe": "",
-        "exploitation_evidence": {"proof_type": "error_based"},
+        "exploitation_evidence": {
+            "proof_type": "error_based",
+            "payload_used": "'",
+            "severity": "high",
+        },
+        "confirmed_facts": ["mysql_error"],
     }, None))
 
     agent = ReasoningAgent(ai_client, _make_comprehender(), ProbeExecutorRuntimeDouble(), TokenLedger(total=100000))
@@ -156,7 +161,7 @@ async def test_loop_continues_on_non_terminal():
         ({"terminal": False, "exploitation_confirmed": False, "confidence": 20, "next_probe": "p2"}, None),
         ({"terminal": False, "exploitation_confirmed": False, "confidence": 30, "next_probe": "p3"}, None),
         ({"terminal": False, "exploitation_confirmed": False, "confidence": 40, "next_probe": "p4"}, None),
-        ({"terminal": True, "exploitation_confirmed": True, "confidence": 90, "next_probe": "", "exploitation_evidence": {}}, None),
+        ({"terminal": True, "exploitation_confirmed": True, "confidence": 90, "next_probe": "", "exploitation_evidence": {"proof_type": "error_based", "payload_used": "p4", "severity": "high"}, "confirmed_facts": ["mysql_error"]}, None),
     ]
     ai_client = SimpleNamespace()
     ai_client.query_with_retry = AsyncMock(side_effect=responses)

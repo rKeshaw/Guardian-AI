@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from math import ceil
 from typing import Any
 
@@ -80,7 +80,7 @@ class ReportingAgent:
                 "target_url": phase_results.get("reconnaissance", {}).get("url", ""),
                 "total_findings": len(findings),
             },
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
         }
         return report
 

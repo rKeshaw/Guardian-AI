@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlencode, parse_qs
-from datetime import datetime
+from datetime import datetime, timezone
 
 import aiohttp
 from pydantic import BaseModel, Field
@@ -695,7 +695,7 @@ class PenetrationAgent(BaseAgent):
 
         return {
             "schema_version": "1.1",
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
             "total_successful_exploits": total_exploits,
             "overall_risk": (
                 "Critical" if total_exploits >= 3 else

@@ -220,6 +220,17 @@ class ReconnaissanceAgent:
         except Exception as exc:
             logger.warning("Technology fingerprint failed for %s: %s", url, exc)
 
+        if waf_detected is None:
+            try:
+                parsed = urlparse(url)
+                sep = "&" if parsed.query else "?"
+                probe_url = f"{url}{sep}guardian_waf_probe=<script>alert(1)</script>"
+                async with session.get(probe_url) as probe_resp:
+                    if probe_resp.status == 403:
+                        waf_detected = "behavioral_waf_detected"
+            except Exception as exc:
+                logger.debug("Behavioral WAF probe failed for %s: %s", url, exc)
+
         return {
             "headers": headers_out,
             "body_technologies": sorted(set(body_technologies)),

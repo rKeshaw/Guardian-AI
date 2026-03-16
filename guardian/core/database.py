@@ -4,7 +4,7 @@ guardian/core/database.py
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -191,7 +191,7 @@ class Database:
                 session_id,
                 agent_name,
                 json.dumps(results, default=str),
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
             ))
             await db.commit()
 
@@ -234,7 +234,7 @@ class Database:
                 task["agent_name"],
                 task["status"],
                 json.dumps(task.get("input_summary", {})),
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
             ))
             await db.commit()
 
@@ -245,7 +245,7 @@ class Database:
             await db.execute("""
                 INSERT INTO agent_errors (session_id, agent_name, error, created_at)
                 VALUES (?, ?, ?, ?)
-            """, (session_id, agent_name, error, datetime.utcnow().isoformat()))
+            """, (session_id, agent_name, error, datetime.now(timezone.utc).isoformat()))
             await db.commit()
 
     async def save_agent_result(self, session_id: str, agent_name: str, results: dict[str, Any]) -> None:
@@ -253,7 +253,7 @@ class Database:
 
     async def upsert_node(self, graph_id: str, node: dict[str, Any]) -> None:
         # Schema guaranteed by Database.initialize() called at startup.
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
@@ -280,7 +280,7 @@ class Database:
 
     async def upsert_graph_meta(self, graph_id: str, meta: dict[str, Any]) -> None:
         # Schema guaranteed by Database.initialize() called at startup.
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """

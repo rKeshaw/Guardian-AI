@@ -9,7 +9,7 @@ import os
 import traceback
 import socket
 import ipaddress
-from datetime import datetime
+from datetime import datetime, timezone
 
 from contextlib import asynccontextmanager
 
@@ -364,7 +364,7 @@ async def scan_websocket(websocket: WebSocket, session_id: str, api_key: str = "
                     break
             except asyncio.TimeoutError:
                 await websocket.send_json(
-                    {"event": "heartbeat", "timestamp": datetime.utcnow().isoformat()}
+                    {"event": "heartbeat", "timestamp": datetime.now(timezone.utc).isoformat()}
                 )
     except WebSocketDisconnect:
         pass
@@ -411,7 +411,7 @@ async def health_check():
     health = orchestrator.get_workflow_health() if orchestrator else {}
     return {
         "status": "operational" if orchestrator and database else "degraded",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "version": "1.0.0",
         "port": port,
         "components": {
