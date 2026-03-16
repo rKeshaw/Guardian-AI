@@ -1,5 +1,5 @@
-from guardian.core.intelligence.quality_monitor import QualityMonitor
-from guardian.core.memory.conversation_memory import ConversationMemory
+from aegis.core.intelligence.quality_monitor import QualityMonitor
+from aegis.core.memory.conversation_memory import ConversationMemory
 
 
 def _turn(probe: str, obs: str, conf: float, next_probe: str | None = None) -> dict:

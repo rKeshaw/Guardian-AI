@@ -1,11 +1,11 @@
-# Guardian AI
+# Aegis
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110-009688.svg)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/rKeshaw/Guardian-AI/releases)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/rKeshaw/Aegis/releases)
 
-> **Guardian AI** — Multi-agent, LLM-assisted penetration testing framework. Automates an 8-phase pipeline covering reconnaissance, vulnerability analysis, hypothesis seeding, payload generation, active exploitation, graph-based exploration, confirmation, and reporting.
+> **Aegis** — Multi-agent, LLM-assisted penetration testing framework. Automates an 8-phase pipeline covering reconnaissance, vulnerability analysis, hypothesis seeding, payload generation, active exploitation, graph-based exploration, confirmation, and reporting.
 
 > ⚠️ **Authorized use only.** Only run this software against systems you own or have explicit written permission to test. Misuse may be illegal.
 
@@ -16,8 +16,8 @@
 **External mode** (bring your own Ollama):
 
 ```bash
-git clone https://github.com/rKeshaw/Guardian-AI.git
-cd Guardian-AI
+git clone https://github.com/rKeshaw/Aegis.git
+cd Aegis
 
 # Clone the payload knowledge base (required)
 git clone https://github.com/swisskyrepo/PayloadsAllTheThings.git
@@ -31,7 +31,7 @@ EOF
 docker compose up
 ```
 
-**Managed mode** (Guardian + Ollama started together):
+**Managed mode** (Aegis + Ollama started together):
 
 ```bash
 docker compose --profile managed up
@@ -43,7 +43,7 @@ Dashboard: `http://localhost:8888` — API docs: `http://localhost:8888/docs` �
 
 ## Architecture
 
-Guardian AI runs a linear, eight-phase pipeline per scan. Each phase is independently configurable via [execution profiles](#execution-profiles).
+Aegis runs a linear, eight-phase pipeline per scan. Each phase is independently configurable via [execution profiles](#execution-profiles).
 
 ```
 Reconnaissance
@@ -97,7 +97,7 @@ A `CentralOrchestrator` manages isolated `ScanContext` objects (one per scan). A
 
 ### External mode (default)
 
-Uses your existing Ollama instance. Only the `guardian_ai` container starts.
+Uses your existing Ollama instance. Only the `aegis` container starts.
 
 ```env
 OLLAMA_BASE_URL=http://host.docker.internal:11434
@@ -106,7 +106,7 @@ OLLAMA_MODEL=mixtral:latest
 
 ### Managed mode (`--profile managed`)
 
-Starts `ollama` + `ollama-init` (model puller) + `guardian_ai` together. Requires Docker with GPU support for best performance.
+Starts `ollama` + `ollama-init` (model puller) + `aegis` together. Requires Docker with GPU support for best performance.
 
 ```bash
 docker compose --profile managed up
@@ -116,7 +116,7 @@ docker compose --profile managed up
 
 ```env
 OLLAMA_HOST_PORT=11435
-GUARDIAN_PORT=8889
+AEGIS_PORT=8889
 ```
 
 ---
@@ -131,11 +131,11 @@ All settings are environment variables. Create a `.env` file in the project root
 | `OLLAMA_MODEL` | `mixtral:latest` | Primary LLM (analysis, generation, reasoning) |
 | `OLLAMA_MODEL_FAST` | `llama3:latest` | Fast model for lightweight tasks |
 | `AI_PROVIDER` | `ollama` | LLM provider (`ollama` / `openai`) |
-| `DATABASE_URL` | `sqlite:////app/data/guardian.db` | SQLite database path |
+| `DATABASE_URL` | `sqlite:////app/data/aegis.db` | SQLite database path |
 | `PAYLOADS_REPO_PATH` | `/PayloadsAllTheThings` | Required knowledge base path |
 | `VERIFY_SSL` | `true` | Toggle SSL certificate verification |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
-| `GUARDIAN_PORT` | `8888` | HTTP port |
+| `AEGIS_PORT` | `8888` | HTTP port |
 | `MAX_GRAPH_TOKENS` | `50000` | Global token budget for graph exploration |
 | `MAX_CONCURRENT_SCANS` | `3` | Maximum parallel scans |
 | `SCAN_EXECUTION_PROFILE` | `aggressive` | Pipeline profile (see below) |
@@ -300,7 +300,7 @@ This significantly reduces false positives from benign side effects.
 
 ## Web Dashboard
 
-Guardian AI ships a built-in web dashboard served at `http://localhost:8888/`. It provides:
+Aegis ships a built-in web dashboard served at `http://localhost:8888/`. It provides:
 
 * **New Scan** — submit target URLs and choose an execution profile
 * **Dashboard** — overview of active and completed scans
@@ -314,14 +314,14 @@ Guardian AI ships a built-in web dashboard served at `http://localhost:8888/`. I
 ## Project Layout
 
 ```
-Guardian-AI/
+Aegis/
 ├── Dockerfile                 # Multi-stage build (Python 3.11-slim)
 ├── docker-compose.yml         # Managed + external deployment modes
 ├── entrypoint.sh              # Permission fix + privilege drop (gosu)
 ├── requirements.txt           # Python dependencies
 ├── pyproject.toml             # pytest configuration
 │
-├── guardian/
+├── aegis/
 │   ├── __init__.py            # Package version (1.0.0)
 │   ├── api/
 │   │   ├── main.py            # FastAPI app, all routes, lifespan
@@ -373,7 +373,7 @@ Guardian-AI/
 │   └── real/                  # Real-HTTP and real-LLM integration tests
 │
 └── data/
-    └── guardian.db            # Pre-initialized SQLite database
+    └── aegis.db            # Pre-initialized SQLite database
 ```
 
 ---
@@ -432,7 +432,7 @@ Please run the test suite before submitting.
 
 **Authorized use only.** Running penetration tests against systems without explicit written permission may violate computer-crime laws in many jurisdictions (e.g. CFAA in the US, Computer Misuse Act in the UK). The project authors accept no liability for misuse.
 
-Guardian AI restricts scan targets to public IPs by default (`SCAN_TARGET_ALLOW_EXTERNAL_ONLY=true`) and blocks private network ranges. Do not disable these safeguards unless you are testing in an isolated lab environment.
+Aegis restricts scan targets to public IPs by default (`SCAN_TARGET_ALLOW_EXTERNAL_ONLY=true`) and blocks private network ranges. Do not disable these safeguards unless you are testing in an isolated lab environment.
 
 If you discover a security vulnerability in this repository, please report it by opening a private GitHub issue or contacting the maintainers directly — do not publish exploit details publicly.
 

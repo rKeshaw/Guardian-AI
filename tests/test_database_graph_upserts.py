@@ -5,8 +5,8 @@ import json
 import aiosqlite
 import pytest
 
-from guardian.core.config import settings
-from guardian.core.database import Database
+from aegis.core.config import settings
+from aegis.core.database import Database
 
 
 @pytest.mark.anyio

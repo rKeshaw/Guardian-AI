@@ -8,7 +8,7 @@ from typing import Any, Callable, Awaitable
 
 import aiohttp
 
-_TIMING_FILE = Path("/tmp/guardian_test_timing.log")
+_TIMING_FILE = Path("/tmp/aegis_test_timing.log")
 
 
 def log_timing(test_name: str, agent_name: str, elapsed_seconds: float) -> None:

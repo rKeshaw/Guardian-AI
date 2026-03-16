@@ -7,8 +7,8 @@ import uuid
 import aiosqlite
 import pytest
 
-from guardian.core.orchestrator import CentralOrchestrator
-from guardian.core.graph.attack_graph import NodeType
+from aegis.core.orchestrator import CentralOrchestrator
+from aegis.core.graph.attack_graph import NodeType
 
 from .helpers import assert_finding_references_vuln_type
 
@@ -47,9 +47,9 @@ async def test_full_pipeline_scan_dvwa_sqli(test_db, dvwa_sqli_url, scan_auth_co
     graph = ctx.graph
 
     try:
-        with open("/tmp/guardian_test_report.json", "w", encoding="utf-8") as f:
+        with open("/tmp/aegis_test_report.json", "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, default=str)
-        with open("/tmp/guardian_test_graph.json", "w", encoding="utf-8") as f:
+        with open("/tmp/aegis_test_graph.json", "w", encoding="utf-8") as f:
             json.dump(graph.to_d3(), f, indent=2, default=str)
     finally:
         pass

@@ -6,11 +6,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from guardian.core.config import settings
-from guardian.core.graph.attack_graph import AttackGraph, Node, NodeType
-from guardian.core.intelligence.reasoning_agent import ReasoningAgent
-from guardian.core.probing.probe_executor import ProbeResult
-from guardian.core.token_ledger import TokenLedger
+from aegis.core.config import settings
+from aegis.core.graph.attack_graph import AttackGraph, Node, NodeType
+from aegis.core.intelligence.reasoning_agent import ReasoningAgent
+from aegis.core.probing.probe_executor import ProbeResult
+from aegis.core.token_ledger import TokenLedger
 
 
 @dataclass
@@ -86,7 +86,7 @@ def _make_hypothesis_node() -> Node:
 async def test_option_b_disabled_does_not_call_rag_helper(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_RAG_PROBING", False)
 
-    from guardian.core.intelligence import rag_helper as rag_module
+    from aegis.core.intelligence import rag_helper as rag_module
 
     call_counter = {"count": 0}
 
@@ -118,7 +118,7 @@ async def test_option_b_disabled_does_not_call_rag_helper(monkeypatch):
 async def test_option_b_enabled_includes_attack_knowledge_context_in_prompt(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_RAG_PROBING", True)
 
-    from guardian.core.intelligence import rag_helper as rag_module
+    from aegis.core.intelligence import rag_helper as rag_module
 
     rag_text = "=== RELEVANT ATTACK KNOWLEDGE (from PayloadsAllTheThings) ===\nSQLi payloads\n=== END KNOWLEDGE CONTEXT ==="
     monkeypatch.setattr(rag_module.rag_helper, "get_probe_context", lambda *args, **kwargs: rag_text)
@@ -146,7 +146,7 @@ async def test_option_b_enabled_includes_attack_knowledge_context_in_prompt(monk
 async def test_option_b_enabled_with_empty_rag_context_keeps_prompt_without_rag_block(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_RAG_PROBING", True)
 
-    from guardian.core.intelligence import rag_helper as rag_module
+    from aegis.core.intelligence import rag_helper as rag_module
 
     monkeypatch.setattr(rag_module.rag_helper, "get_probe_context", lambda *args, **kwargs: "")
 
@@ -173,7 +173,7 @@ async def test_option_b_enabled_with_empty_rag_context_keeps_prompt_without_rag_
 async def test_option_b_insufficient_ledger_budget_drops_rag_context_and_logs_warning(monkeypatch, caplog):
     monkeypatch.setattr(settings, "ENABLE_RAG_PROBING", True)
 
-    from guardian.core.intelligence import rag_helper as rag_module
+    from aegis.core.intelligence import rag_helper as rag_module
 
     rag_text = "R" * 400
     monkeypatch.setattr(rag_module.rag_helper, "get_probe_context", lambda *args, **kwargs: rag_text)

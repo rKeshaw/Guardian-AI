@@ -4,16 +4,16 @@ import uuid
 
 import pytest
 
-from guardian.agents.hypothesis_agent import HypothesisAgent
-from guardian.agents.penetration_agent import PenetrationAgent
-from guardian.agents.reconnaissance_agent import ReconnaissanceAgent
-from guardian.agents.vulnerability_agent import VulnerabilityAnalysisAgent
-from guardian.core.ai_client import AIClient
-from guardian.core.graph.attack_graph import AttackGraph, Node, NodeType
-from guardian.core.graph.graph_orchestrator import GraphOrchestrator
-from guardian.core.intelligence.comprehender import Comprehender
-from guardian.core.probing.probe_executor import ProbeExecutor
-from guardian.core.token_ledger import TokenLedger
+from aegis.agents.hypothesis_agent import HypothesisAgent
+from aegis.agents.penetration_agent import PenetrationAgent
+from aegis.agents.reconnaissance_agent import ReconnaissanceAgent
+from aegis.agents.vulnerability_agent import VulnerabilityAnalysisAgent
+from aegis.core.ai_client import AIClient
+from aegis.core.graph.attack_graph import AttackGraph, Node, NodeType
+from aegis.core.graph.graph_orchestrator import GraphOrchestrator
+from aegis.core.intelligence.comprehender import Comprehender
+from aegis.core.probing.probe_executor import ProbeExecutor
+from aegis.core.token_ledger import TokenLedger
 
 from .helpers import assert_valid_hypotheses, timed_call
 

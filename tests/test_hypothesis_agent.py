@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from guardian.agents.hypothesis_agent import HypothesisAgent
-from guardian.core.graph.attack_graph import AttackGraph, NodeType
-from guardian.core.token_ledger import TokenLedger
+from aegis.agents.hypothesis_agent import HypothesisAgent
+from aegis.core.graph.attack_graph import AttackGraph, NodeType
+from aegis.core.token_ledger import TokenLedger
 
 
 def _valid_hypothesis(confidence: int = 72, text: str = "SQLi hypothesis") -> dict:

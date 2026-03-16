@@ -1,6 +1,6 @@
-from guardian.agents.payload_agent import PayloadGenerationAgent
-from guardian.agents.penetration_agent import PenetrationAgent
-from guardian.agents.vulnerability_agent import VulnerabilityAnalysisAgent
+from aegis.agents.payload_agent import PayloadGenerationAgent
+from aegis.agents.penetration_agent import PenetrationAgent
+from aegis.agents.vulnerability_agent import VulnerabilityAnalysisAgent
 
 
 def test_vulnerability_summary_supports_flat_recon_shape():

@@ -8,8 +8,8 @@ from typing import AsyncGenerator
 import aiohttp
 import pytest
 
-from guardian.core.config import settings
-from guardian.core.database import Database
+from aegis.core.config import settings
+from aegis.core.database import Database
 
 import pytest
 
@@ -41,7 +41,7 @@ async def dvwa_login(base_url: str) -> dict:
     """
     Returns dict with keys: phpsessid, security
     suitable for use as cookies= in aiohttp requests
-    and as Cookie header value in Guardian scan config.
+    and as Cookie header value in Aegis scan config.
     """
     timeout = aiohttp.ClientTimeout(total=20)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -97,7 +97,7 @@ def _ensure_dvwa_reachable(dvwa_base_url: str):
 
 @pytest.fixture(scope="session")
 def dvwa_base_url() -> str:
-    return os.getenv("DVWA_BASE_URL", "http://guardian-dvwa:80")
+    return os.getenv("DVWA_BASE_URL", "http://aegis-dvwa:80")
 
 
 @pytest.fixture(scope="session")
@@ -114,12 +114,12 @@ async def dvwa_cookies(dvwa_base_url: str) -> dict:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def guardian_settings(ollama_base_url: str):
+def aegis_settings(ollama_base_url: str):
     settings.OLLAMA_BASE_URL = ollama_base_url
     # settings.OLLAMA_MODEL = "mistral:latest"
     settings.DEFAULT_MODEL = "mistral:latest"
     # settings.OLLAMA_MODEL_FAST = "mistral:latest"
-    settings.DATABASE_URL = "sqlite:////tmp/guardian_test.db"
+    settings.DATABASE_URL = "sqlite:////tmp/aegis_test.db"
     settings.VERIFY_SSL = False
     # settings.MAX_GRAPH_TOKENS = 10000
     # settings.ENABLE_ACTIVE_CONFIRMATION = True
@@ -140,7 +140,7 @@ def guardian_settings(ollama_base_url: str):
 
 
 @pytest.fixture(scope="session")
-async def test_db(guardian_settings) -> AsyncGenerator[Database, None]:
+async def test_db(aegis_settings) -> AsyncGenerator[Database, None]:
     db = Database()
     await db.initialize()
 

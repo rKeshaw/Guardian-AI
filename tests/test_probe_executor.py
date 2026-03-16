@@ -1,4 +1,4 @@
-from guardian.core.probing.probe_executor import ProbeExecutor, InjectionPoint
+from aegis.core.probing.probe_executor import ProbeExecutor, InjectionPoint
 import pytest
 
 def test_generate_baseline_probe_unique_values():

@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from guardian.agents.reporting_agent import ReportingAgent
-from guardian.core.graph.attack_graph import AttackGraph, Edge, EdgeType, Node, NodeType
-from guardian.core.token_ledger import TokenLedger
+from aegis.agents.reporting_agent import ReportingAgent
+from aegis.core.graph.attack_graph import AttackGraph, Edge, EdgeType, Node, NodeType
+from aegis.core.token_ledger import TokenLedger
 
 
 def _make_agent(ai_payload):

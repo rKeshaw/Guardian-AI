@@ -1,4 +1,4 @@
-from guardian.core.intelligence.comprehender import Comprehender
+from aegis.core.intelligence.comprehender import Comprehender
 
 
 def _facts(comp):

@@ -1,4 +1,4 @@
-from guardian.agents.penetration_agent import Baseline, PenetrationAgent, TestResult as PentestResult
+from aegis.agents.penetration_agent import Baseline, PenetrationAgent, TestResult as PentestResult
 
 
 def test_differential_indicators_does_not_flag_admin_nav_text():

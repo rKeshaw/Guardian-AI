@@ -7,22 +7,22 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from guardian.api.main import app
-from guardian.core.graph.attack_graph import AttackGraph, Edge, EdgeType, Node, NodeType
+from aegis.api.main import app
+from aegis.core.graph.attack_graph import AttackGraph, Edge, EdgeType, Node, NodeType
 
 
 async def _client_with(main_module):
     async def _ok_init() -> bool:
         return True
 
-    main_module.initialize_guardian_components = _ok_init
+    main_module.initialize_aegis_components = _ok_init
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 
 @pytest.mark.anyio
 async def test_health_returns_200():
-    import guardian.api.main as main_module
+    import aegis.api.main as main_module
 
     main_module.orchestrator = SimpleNamespace(get_workflow_health=lambda: {"active_sessions": 0, "slots_available": 5})
     main_module.database = object()
@@ -37,7 +37,7 @@ async def test_health_returns_200():
 
 @pytest.mark.anyio
 async def test_start_scan_returns_session_id():
-    import guardian.api.main as main_module
+    import aegis.api.main as main_module
 
     orch = SimpleNamespace(start_scan=AsyncMock(return_value="sess-123"))
     main_module.orchestrator = orch
@@ -52,7 +52,7 @@ async def test_start_scan_returns_session_id():
 
 @pytest.mark.anyio
 async def test_start_scan_invalid_url_returns_422():
-    import guardian.api.main as main_module
+    import aegis.api.main as main_module
 
     main_module.orchestrator = SimpleNamespace(start_scan=AsyncMock(return_value="sess-123"))
     main_module.database = object()
@@ -65,7 +65,7 @@ async def test_start_scan_invalid_url_returns_422():
 
 @pytest.mark.anyio
 async def test_start_scan_empty_urls_returns_422():
-    import guardian.api.main as main_module
+    import aegis.api.main as main_module
 
     main_module.orchestrator = SimpleNamespace(start_scan=AsyncMock(return_value="sess-123"))
     main_module.database = object()
@@ -78,7 +78,7 @@ async def test_start_scan_empty_urls_returns_422():
 
 @pytest.mark.anyio
 async def test_stop_scan_not_found_returns_404():
-    import guardian.api.main as main_module
+    import aegis.api.main as main_module
 
     orch = SimpleNamespace(stop_scan=AsyncMock(side_effect=KeyError("missing")))
     main_module.orchestrator = orch
@@ -92,7 +92,7 @@ async def test_stop_scan_not_found_returns_404():
 
 @pytest.mark.anyio
 async def test_graph_endpoint_returns_d3_structure():
-    import guardian.api.main as main_module
+    import aegis.api.main as main_module
 
     graph = AttackGraph(graph_id="g1")
     h = Node(id="h1", type=NodeType.HYPOTHESIS, content="hyp", data={"hypothesis": "hyp"})
@@ -116,7 +116,7 @@ async def test_graph_endpoint_returns_d3_structure():
 
 @pytest.mark.anyio
 async def test_status_fallback_to_db():
-    import guardian.api.main as main_module
+    import aegis.api.main as main_module
 
     orch = SimpleNamespace(get_session_status=AsyncMock(side_effect=KeyError("evicted")))
     session_row = SimpleNamespace(
@@ -139,7 +139,7 @@ async def test_status_fallback_to_db():
 
 @pytest.mark.anyio
 async def test_start_scan_requires_api_key_when_configured(monkeypatch):
-    import guardian.api.main as main_module
+    import aegis.api.main as main_module
 
     monkeypatch.setattr(main_module.settings, "API_KEY", "secret")
     monkeypatch.setattr(main_module, "validate_scan_target", lambda _u: None)
@@ -156,7 +156,7 @@ async def test_start_scan_requires_api_key_when_configured(monkeypatch):
 
 @pytest.mark.anyio
 async def test_start_scan_allows_without_api_key_when_not_configured(monkeypatch):
-    import guardian.api.main as main_module
+    import aegis.api.main as main_module
 
     monkeypatch.setattr(main_module.settings, "API_KEY", "")
     monkeypatch.setattr(main_module, "validate_scan_target", lambda _u: None)
@@ -172,7 +172,7 @@ async def test_start_scan_allows_without_api_key_when_not_configured(monkeypatch
 
 
 def test_validate_scan_target_denies_private_ip(monkeypatch):
-    import guardian.api.main as main_module
+    import aegis.api.main as main_module
 
     monkeypatch.setattr(main_module.settings, "SCAN_TARGET_ALLOW_EXTERNAL_ONLY", True)
     monkeypatch.setattr(main_module.settings, "SCAN_TARGET_DENY_CIDRS", "10.0.0.0/8,192.168.0.0/16")
@@ -185,7 +185,7 @@ def test_validate_scan_target_denies_private_ip(monkeypatch):
 
 
 def test_validate_scan_target_denies_metadata_ip(monkeypatch):
-    import guardian.api.main as main_module
+    import aegis.api.main as main_module
 
     monkeypatch.setattr(main_module.settings, "SCAN_TARGET_ALLOW_EXTERNAL_ONLY", True)
     monkeypatch.setattr(main_module.settings, "SCAN_TARGET_DENY_CIDRS", "169.254.0.0/16")
@@ -198,7 +198,7 @@ def test_validate_scan_target_denies_metadata_ip(monkeypatch):
 
 
 def test_validate_scan_target_allows_public_ip(monkeypatch):
-    import guardian.api.main as main_module
+    import aegis.api.main as main_module
 
     monkeypatch.setattr(main_module.settings, "SCAN_TARGET_ALLOW_EXTERNAL_ONLY", True)
     monkeypatch.setattr(main_module.settings, "SCAN_TARGET_DENY_CIDRS", "10.0.0.0/8")
@@ -208,7 +208,7 @@ def test_validate_scan_target_allows_public_ip(monkeypatch):
 
 
 def test_validate_scan_target_dns_failure_allowed(monkeypatch):
-    import guardian.api.main as main_module
+    import aegis.api.main as main_module
 
     def _boom(*args, **kwargs):
         raise main_module.socket.gaierror("dns failure")

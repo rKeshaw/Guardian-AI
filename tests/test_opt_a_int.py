@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from guardian.core.config import settings
-from guardian.core.database import Database
-from guardian.core.graph.attack_graph import Node, NodeType
-from guardian.core.orchestrator import CentralOrchestrator, ScanContext
+from aegis.core.config import settings
+from aegis.core.database import Database
+from aegis.core.graph.attack_graph import Node, NodeType
+from aegis.core.orchestrator import CentralOrchestrator, ScanContext
 
 
 @pytest.mark.anyio
