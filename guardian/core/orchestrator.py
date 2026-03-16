@@ -9,7 +9,7 @@ import random
 import ssl
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -43,7 +43,7 @@ class ScanContext:
     target_urls: list[str]
     config: dict[str, Any]
     status: ScanStatus = ScanStatus.INITIALIZING
-    started_at: datetime = field(default_factory=datetime.utcnow)
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
     error_message: str | None = None
 
@@ -66,7 +66,7 @@ class ScanContext:
 
     def age_seconds(self) -> float:
         ref = self.completed_at or self.started_at
-        return (datetime.utcnow() - ref).total_seconds()
+        return (datetime.now(timezone.utc) - ref).total_seconds()
 
 
 class CentralOrchestrator:
@@ -153,7 +153,7 @@ class CentralOrchestrator:
                 pass
         ctx.status = ScanStatus.ERROR
         ctx.error_message = "Scan stopped by operator request."
-        ctx.completed_at = datetime.utcnow()
+        ctx.completed_at = datetime.now(timezone.utc)
         await self._save_session(ctx)
 
     async def get_agent_results(self, session_id: str, agent_name: str) -> list[dict[str, Any]]:
@@ -171,7 +171,7 @@ class CentralOrchestrator:
             "total_sessions_in_memory": len(self._registry),
             "max_concurrent_scans": self.MAX_CONCURRENT_SCANS,
             "slots_available": max(0, self.MAX_CONCURRENT_SCANS - self._active_scans),
-            "last_checked": datetime.utcnow().isoformat(),
+            "last_checked": datetime.now(timezone.utc).isoformat(),
         }
 
     async def _run_pipeline_with_semaphore(self, ctx: ScanContext) -> None:
@@ -192,7 +192,7 @@ class CentralOrchestrator:
             if "reconnaissance" not in ctx.failed_phases and not recon_result.get("url") and not recon_result.get("domain"):
                 ctx.status = ScanStatus.ERROR
                 ctx.error_message = "Reconnaissance phase produced empty result — aborting pipeline."
-                ctx.completed_at = datetime.utcnow()
+                ctx.completed_at = datetime.now(timezone.utc)
                 await self._save_session(ctx)
                 self._publish(ctx, {"event": "scan_error", "session_id": ctx.session_id, "error": ctx.error_message})
                 return
@@ -219,7 +219,7 @@ class CentralOrchestrator:
                 )
             else:
                 ctx.status = ScanStatus.COMPLETED
-            ctx.completed_at = datetime.utcnow()
+            ctx.completed_at = datetime.now(timezone.utc)
             await self._save_session(ctx)
             self._publish(ctx, {"event": "scan_complete", "session_id": ctx.session_id})
 
@@ -228,7 +228,7 @@ class CentralOrchestrator:
         except Exception as exc:
             ctx.status = ScanStatus.ERROR
             ctx.error_message = str(exc)
-            ctx.completed_at = datetime.utcnow()
+            ctx.completed_at = datetime.now(timezone.utc)
             await self._save_session(ctx)
             self._publish(ctx, {"event": "scan_error", "session_id": ctx.session_id, "error": str(exc)})
 
@@ -244,7 +244,7 @@ class CentralOrchestrator:
         return phase_name in {"reconnaissance", "hypothesis_seeding", "graph_exploration", "reporting"}
 
     async def _run_phase(self, ctx: ScanContext, phase_name: str) -> dict[str, Any]:
-        t0 = datetime.utcnow()
+        t0 = datetime.now(timezone.utc)
         ctx.agents[phase_name] = {"status": "running"}
         self._publish(ctx, {"event": "phase_start", "phase": phase_name})
 
@@ -257,7 +257,7 @@ class CentralOrchestrator:
             ctx.results[phase_name] = result
             ctx.phase_results[phase_name] = result
             self._record_typed_phase_result(ctx, phase_name, result)
-            duration = (datetime.utcnow() - t0).total_seconds()
+            duration = (datetime.now(timezone.utc) - t0).total_seconds()
             ctx.agent_metrics[phase_name] = {
                 "execution_time_s": round(duration, 2),
                 "success": True,
@@ -279,7 +279,7 @@ class CentralOrchestrator:
             ctx.results[phase_name] = result
             ctx.phase_results[phase_name] = result
             self._record_typed_phase_result(ctx, phase_name, result)
-            duration = (datetime.utcnow() - t0).total_seconds()
+            duration = (datetime.now(timezone.utc) - t0).total_seconds()
             ctx.agent_metrics[phase_name] = {
                 "execution_time_s": round(duration, 2),
                 "success": True,
@@ -301,7 +301,7 @@ class CentralOrchestrator:
             ctx.results[phase_name] = result
             ctx.phase_results[phase_name] = result
             self._record_typed_phase_result(ctx, phase_name, result)
-            duration = (datetime.utcnow() - t0).total_seconds()
+            duration = (datetime.now(timezone.utc) - t0).total_seconds()
             ctx.agent_metrics[phase_name] = {
                 "execution_time_s": round(duration, 2),
                 "success": True,
@@ -323,7 +323,7 @@ class CentralOrchestrator:
             ctx.results[phase_name] = result
             ctx.phase_results[phase_name] = result
             self._record_typed_phase_result(ctx, phase_name, result)
-            duration = (datetime.utcnow() - t0).total_seconds()
+            duration = (datetime.now(timezone.utc) - t0).total_seconds()
             ctx.agent_metrics[phase_name] = {
                 "execution_time_s": round(duration, 2),
                 "success": True,
@@ -360,7 +360,7 @@ class CentralOrchestrator:
             else:
                 raise ValueError(f"Unknown phase: {phase_name}")
 
-            duration = (datetime.utcnow() - t0).total_seconds()
+            duration = (datetime.now(timezone.utc) - t0).total_seconds()
             ctx.results[phase_name] = result
             ctx.phase_results[phase_name] = result
             self._record_typed_phase_result(ctx, phase_name, result)
@@ -379,7 +379,7 @@ class CentralOrchestrator:
             )
             return result
         except Exception as exc:
-            duration = (datetime.utcnow() - t0).total_seconds()
+            duration = (datetime.now(timezone.utc) - t0).total_seconds()
             ctx.agent_metrics[phase_name] = {
                 "execution_time_s": round(duration, 2),
                 "success": False,
@@ -976,7 +976,7 @@ class CentralOrchestrator:
 
     def _publish(self, ctx: ScanContext, event: dict) -> None:
         try:
-            ctx.event_queue.put_nowait({**event, "timestamp": datetime.utcnow().isoformat()})
+            ctx.event_queue.put_nowait({**event, "timestamp": datetime.now(timezone.utc).isoformat()})
         except asyncio.QueueFull:
             pass
 

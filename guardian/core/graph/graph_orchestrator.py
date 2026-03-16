@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from guardian.core.ai_client import AIPersona, estimate_tokens
 from guardian.core.config import settings
@@ -268,6 +268,6 @@ class GraphOrchestrator:
         if event_queue is None:
             return
         try:
-            event_queue.put_nowait({**event, "timestamp": datetime.utcnow().isoformat()})
+            event_queue.put_nowait({**event, "timestamp": datetime.now(timezone.utc).isoformat()})
         except Exception:
             pass
