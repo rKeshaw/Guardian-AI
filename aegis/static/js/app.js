@@ -1,7 +1,17 @@
+function readSessions() {
+  try {
+    const raw = sessionStorage.getItem("aegis_sessions") || "[]";
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 const state = {
   currentView: "dashboard",
   currentParams: {},
-  sessions: JSON.parse(sessionStorage.getItem("aegis_sessions") || "[]"),
+  sessions: readSessions(),
   apiKey: sessionStorage.getItem("aegis_api_key") || "",
   activeWebSockets: {},
   sessionPoller: null,
@@ -210,4 +220,3 @@ function initApp() {
   state.healthPoller = setInterval(checkHealthAndApiKey, 30000);
 }
 window.initApp = initApp;
-

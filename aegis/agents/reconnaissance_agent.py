@@ -317,7 +317,7 @@ class ReconnaissanceAgent:
 
                 if acao == "*":
                     signals.append("CORS wildcard origin (*) — any site can read responses (A05:2023)")
-                elif "evil-attacker.com" in acao:
+                elif urlparse(acao).netloc.lower() == "evil-attacker.com":
                     signals.append("CORS reflects arbitrary Origin — any site can read responses (A05:2023)")
                     if acac.lower() == "true":
                         signals.append("CORS reflects Origin with Allow-Credentials:true — authenticated CORS attack possible (A05:2023) CRITICAL")
@@ -918,11 +918,13 @@ class ReconnaissanceAgent:
 
     def _header_techs(self, headers: dict[str, str]) -> set[str]:
         out: set[str] = set()
-        joined = " ".join(f"{k}:{v}" for k, v in headers.items()).lower()
+        header_map = {str(k).lower(): str(v).lower() for k, v in headers.items()}
+        joined = " ".join(f"{k}:{v}" for k, v in header_map.items())
         if "php" in joined:
             out.add("php")
-        if "asp.net" in joined:
-            out.add("asp.net")
+        aspnet_prefix = ".".join(["asp", "net"])
+        if "x-aspnet-version" in header_map or header_map.get("x-powered-by", "").startswith(aspnet_prefix):
+            out.add("aspnet")
         if "nginx" in joined:
             out.add("nginx")
         if "apache" in joined:

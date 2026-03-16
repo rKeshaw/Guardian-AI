@@ -152,7 +152,7 @@ class Comprehender:
         )
 
         # XSS canonicalization by vector type
-        if re.search(r"<\s*script\b[\s\S]*?<\s*/\s*script\s*>", lowered, flags=re.IGNORECASE):
+        if re.search(r"<\s*script\b[\s\S]*?<\s*/\s*script(?:\s+[^>]*)?>", lowered, flags=re.IGNORECASE):
             lowered = "xss_script_tag"
         elif re.search(r"<\s*img\b[^>]*onerror\s*=", lowered, flags=re.IGNORECASE):
             lowered = "xss_img_tag"
