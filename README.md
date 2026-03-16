@@ -269,6 +269,8 @@ Every scan gets its own `ScanContext` (agents, event queue, attack graph, token 
 
 `HypothesisAgent` maps detected technologies to pre-defined hypothesis templates (e.g. WordPress XML-RPC abuse, Django debug-mode exposure, Laravel `.env` leakage) and generates typed `HypothesisSchema` objects with confidence scores and entry probes.
 
+During seeding, hypothesis nodes are always added to the in-memory attack graph first. Database persistence is best-effort in this path, so scans continue even in lightweight/test environments where graph tables are not initialized yet.
+
 ### Graph-based exploration
 
 The attack graph models the scan as interconnected nodes (`HYPOTHESIS`, `PROBE`, `OBSERVATION`, `FINDING`, `DEAD_END`). `GraphOrchestrator` maintains a priority frontier and dispatches `ReasoningAgent` for multi-turn LLM-assisted hypothesis testing. Explored branches are semantically compressed to stay within the `MAX_GRAPH_TOKENS` budget.
@@ -395,13 +397,13 @@ Aegis/
 pip install -r requirements.txt
 
 # Run all unit tests (no real HTTP or LLM calls)
-pytest
+python -m pytest -q
 
 # Run only tests that make real HTTP requests
-pytest -m real_http
+python -m pytest -q -m real_http
 
 # Run full pipeline integration tests (requires Ollama + DVWA)
-pytest -m real_llm
+python -m pytest -q -m real_llm
 ```
 
 Test markers defined in `pyproject.toml`:
