@@ -1,4 +1,4 @@
-from guardian.core.memory.conversation_memory import ConversationMemory
+from aegis.core.memory.conversation_memory import ConversationMemory
 
 
 def _turn(i: int, probe: str, obs: str, confidence: float) -> dict:

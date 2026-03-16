@@ -1,4 +1,4 @@
-from guardian.core.memory.semantic_unit import SemanticUnit
+from aegis.core.memory.semantic_unit import SemanticUnit
 
 
 def test_entropy_empty_string():

@@ -5,9 +5,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from guardian.core.graph.attack_graph import AttackGraph, Node, NodeType
-from guardian.core.graph.graph_orchestrator import GraphOrchestrator
-from guardian.core.token_ledger import TokenLedger
+from aegis.core.graph.attack_graph import AttackGraph, Node, NodeType
+from aegis.core.graph.graph_orchestrator import GraphOrchestrator
+from aegis.core.token_ledger import TokenLedger
 
 
 def _hypothesis_node(node_id: str, confidence: float = 0.6, impact: int = 5, depth: int = 0) -> Node:
@@ -63,6 +63,7 @@ class DummyDB:
 
 @pytest.mark.anyio
 async def test_single_hypothesis_finding_triggers_expansion(monkeypatch):
+    monkeypatch.setattr("aegis.core.graph.graph_orchestrator.settings.ENABLE_LLM_JUDGE", False, raising=False)
     db = DummyDB()
     ai_client = SimpleNamespace()
     ai_client.query_with_retry = AsyncMock(
@@ -113,7 +114,7 @@ async def test_single_hypothesis_finding_triggers_expansion(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.explore = AsyncMock(return_value=_finding_node())
 
-    monkeypatch.setattr("guardian.core.intelligence.reasoning_agent.ReasoningAgent", FakeReasoningAgent)
+    monkeypatch.setattr("aegis.core.intelligence.reasoning_agent.ReasoningAgent", FakeReasoningAgent)
 
     graph = AttackGraph()
     graph.add_node(_hypothesis_node("h1"))
@@ -145,7 +146,7 @@ async def test_dead_end_not_expanded(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.explore = AsyncMock(return_value=None)
 
-    monkeypatch.setattr("guardian.core.intelligence.reasoning_agent.ReasoningAgent", FakeReasoningAgent)
+    monkeypatch.setattr("aegis.core.intelligence.reasoning_agent.ReasoningAgent", FakeReasoningAgent)
 
     graph = AttackGraph()
     graph.add_node(_hypothesis_node("h1"))
@@ -165,7 +166,7 @@ async def test_critical_budget_stops_loop(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.explore = AsyncMock(return_value=None)
 
-    monkeypatch.setattr("guardian.core.intelligence.reasoning_agent.ReasoningAgent", FakeReasoningAgent)
+    monkeypatch.setattr("aegis.core.intelligence.reasoning_agent.ReasoningAgent", FakeReasoningAgent)
 
     graph = AttackGraph()
     graph.add_node(_hypothesis_node("h1"))
@@ -187,9 +188,9 @@ async def test_compression_triggered_at_threshold(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.explore = AsyncMock(return_value=None)
 
-    monkeypatch.setattr("guardian.core.intelligence.reasoning_agent.ReasoningAgent", FakeReasoningAgent)
-    monkeypatch.setattr("guardian.core.graph.graph_orchestrator.settings.MAX_GRAPH_TOKENS", 20000, raising=False)
-    monkeypatch.setattr("guardian.core.graph.graph_orchestrator.settings.GRAPH_COMPRESS_THRESHOLD", 0.8, raising=False)
+    monkeypatch.setattr("aegis.core.intelligence.reasoning_agent.ReasoningAgent", FakeReasoningAgent)
+    monkeypatch.setattr("aegis.core.graph.graph_orchestrator.settings.MAX_GRAPH_TOKENS", 20000, raising=False)
+    monkeypatch.setattr("aegis.core.graph.graph_orchestrator.settings.GRAPH_COMPRESS_THRESHOLD", 0.8, raising=False)
 
     graph = AttackGraph()
     for i in range(12):
@@ -234,7 +235,7 @@ async def test_graph_persisted_after_exploration(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.explore = AsyncMock(return_value=None)
 
-    monkeypatch.setattr("guardian.core.intelligence.reasoning_agent.ReasoningAgent", FakeReasoningAgent)
+    monkeypatch.setattr("aegis.core.intelligence.reasoning_agent.ReasoningAgent", FakeReasoningAgent)
 
     graph = AttackGraph()
     graph.add_node(_hypothesis_node("h1"))
@@ -291,3 +292,55 @@ async def test_compress_graph_offloads_to_thread_pool(monkeypatch):
 
     assert calls["thread_name"] is not None
     assert calls["thread_name"] != threading.current_thread().name
+
+
+@pytest.mark.anyio
+async def test_llm_judge_false_positive_marks_dead_end(monkeypatch):
+    db = DummyDB()
+    ai_client = SimpleNamespace()
+    ai_client.query_with_retry = AsyncMock(return_value=({"new_hypotheses": []}, None))
+
+    class FakeReasoningAgent:
+        def __init__(self, *args, **kwargs):
+            self.explore = AsyncMock(return_value=_finding_node("f-fp"))
+
+    monkeypatch.setattr("aegis.core.intelligence.reasoning_agent.ReasoningAgent", FakeReasoningAgent)
+    monkeypatch.setattr("aegis.core.graph.graph_orchestrator.settings.ENABLE_LLM_JUDGE", True, raising=False)
+
+    graph = AttackGraph()
+    hyp = _hypothesis_node("h-fp")
+    graph.add_node(hyp)
+
+    orch = GraphOrchestrator(ai_client=ai_client, comprehender=SimpleNamespace(compress=lambda c, s: {"content": c, "irreducible_facts": []}), db=db)
+    orch._quality_monitor = SimpleNamespace(judge_finding=AsyncMock(return_value={"verdict": "false_positive", "confidence_adjustment": -1.0, "reasoning": "insufficient"}))
+
+    await orch.run("s-fp", {}, graph, probe_executor=SimpleNamespace(), ledger=TokenLedger(total=100000))
+
+    assert graph.nodes[hyp.id].type == NodeType.DEAD_END
+    assert all(n.type != NodeType.FINDING for n in graph.nodes.values())
+
+
+@pytest.mark.anyio
+async def test_llm_judge_uncertain_requeues_hypothesis(monkeypatch):
+    db = DummyDB()
+    ai_client = SimpleNamespace()
+    ai_client.query_with_retry = AsyncMock(return_value=({"new_hypotheses": []}, None))
+
+    class FakeReasoningAgent:
+        def __init__(self, *args, **kwargs):
+            self.explore = AsyncMock(side_effect=[_finding_node("f-u"), None])
+
+    monkeypatch.setattr("aegis.core.intelligence.reasoning_agent.ReasoningAgent", FakeReasoningAgent)
+    monkeypatch.setattr("aegis.core.graph.graph_orchestrator.settings.ENABLE_LLM_JUDGE", True, raising=False)
+
+    graph = AttackGraph()
+    hyp = _hypothesis_node("h-u", confidence=0.8)
+    graph.add_node(hyp)
+
+    orch = GraphOrchestrator(ai_client=ai_client, comprehender=SimpleNamespace(compress=lambda c, s: {"content": c, "irreducible_facts": []}), db=db)
+    orch._quality_monitor = SimpleNamespace(judge_finding=AsyncMock(return_value={"verdict": "uncertain", "confidence_adjustment": -0.2, "reasoning": "weak evidence"}))
+
+    await orch.run("s-u", {}, graph, probe_executor=SimpleNamespace(), ledger=TokenLedger(total=100000))
+
+    assert graph.nodes[hyp.id].type in (NodeType.HYPOTHESIS, NodeType.DEAD_END)
+    assert all(n.id != "f-u" for n in graph.nodes.values())

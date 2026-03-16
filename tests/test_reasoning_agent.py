@@ -9,11 +9,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from guardian.core.graph.attack_graph import AttackGraph, Node, NodeType
-from guardian.core.intelligence.reasoning_agent import ReasoningAgent
-from guardian.core.memory.semantic_unit import SemanticUnit
-from guardian.core.token_ledger import TokenLedger
-from guardian.core.probing.probe_executor import InjectionPoint
+from aegis.core.graph.attack_graph import AttackGraph, Node, NodeType
+from aegis.core.intelligence.reasoning_agent import ReasoningAgent
+from aegis.core.memory.semantic_unit import SemanticUnit
+from aegis.core.token_ledger import TokenLedger
+from aegis.core.probing.probe_executor import InjectionPoint
 
 
 @dataclass
@@ -53,11 +53,11 @@ class ProbeExecutorModuleDouble:
 
 
 # make import path used by ResponseAnalyzer available
-probing_pkg = types.ModuleType("guardian.core.probing")
-probe_module = types.ModuleType("guardian.core.probing.probe_executor")
+probing_pkg = types.ModuleType("aegis.core.probing")
+probe_module = types.ModuleType("aegis.core.probing.probe_executor")
 probe_module.ProbeExecutor = ProbeExecutorModuleDouble
-sys.modules["guardian.core.probing"] = probing_pkg
-sys.modules["guardian.core.probing.probe_executor"] = probe_module
+sys.modules["aegis.core.probing"] = probing_pkg
+sys.modules["aegis.core.probing.probe_executor"] = probe_module
 
 
 class ProbeExecutorRuntimeDouble:

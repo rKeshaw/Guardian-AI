@@ -1,4 +1,4 @@
-from guardian.core.graph.attack_graph import AttackGraph, Edge, EdgeType, Node, NodeType
+from aegis.core.graph.attack_graph import AttackGraph, Edge, EdgeType, Node, NodeType
 
 
 class TestAttackGraph:

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from guardian.core.ai_client import AIClient, AIPersona
+from aegis.core.ai_client import AIClient, AIPersona
 
 
 @pytest.mark.anyio
@@ -46,8 +46,8 @@ async def test_query_ai_options_include_persona_runtime_params_without_format(mo
 
 def test_provider_chain_includes_fallback_when_distinct(monkeypatch):
     client = AIClient()
-    monkeypatch.setattr("guardian.core.ai_client.settings.AI_PROVIDER", "openai")
-    monkeypatch.setattr("guardian.core.ai_client.settings.AI_FALLBACK_PROVIDER", "ollama")
+    monkeypatch.setattr("aegis.core.ai_client.settings.AI_PROVIDER", "openai")
+    monkeypatch.setattr("aegis.core.ai_client.settings.AI_FALLBACK_PROVIDER", "ollama")
 
     chain = client._provider_chain()
 
@@ -56,8 +56,8 @@ def test_provider_chain_includes_fallback_when_distinct(monkeypatch):
 
 def test_provider_chain_omits_none_fallback(monkeypatch):
     client = AIClient()
-    monkeypatch.setattr("guardian.core.ai_client.settings.AI_PROVIDER", "ollama")
-    monkeypatch.setattr("guardian.core.ai_client.settings.AI_FALLBACK_PROVIDER", "none")
+    monkeypatch.setattr("aegis.core.ai_client.settings.AI_PROVIDER", "ollama")
+    monkeypatch.setattr("aegis.core.ai_client.settings.AI_FALLBACK_PROVIDER", "none")
 
     chain = client._provider_chain()
 

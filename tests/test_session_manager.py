@@ -7,15 +7,15 @@ from types import SimpleNamespace
 
 import pytest
 
-if "guardian.core.probing" in sys.modules and not hasattr(sys.modules["guardian.core.probing"], "__path__"):
-    module_path = Path(__file__).resolve().parents[1] / "guardian" / "core" / "probing" / "session_manager.py"
+if "aegis.core.probing" in sys.modules and not hasattr(sys.modules["aegis.core.probing"], "__path__"):
+    module_path = Path(__file__).resolve().parents[1] / "aegis" / "core" / "probing" / "session_manager.py"
     spec = importlib.util.spec_from_file_location("session_manager_for_tests", module_path)
     _mod = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     spec.loader.exec_module(_mod)
     SessionManager = _mod.SessionManager
 else:
-    from guardian.core.probing.session_manager import SessionManager
+    from aegis.core.probing.session_manager import SessionManager
 
 
 class _Resp:

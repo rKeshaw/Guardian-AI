@@ -1,4 +1,4 @@
-# guardian/docker-compose.yml
+# aegis/docker-compose.yml
 #
 # Two deployment modes:
 #
@@ -21,7 +21,7 @@ services:
   ollama:
     profiles: [managed]
     image: ollama/ollama:latest
-    container_name: guardian_ollama
+    container_name: aegis_ollama
     ports:
       - "${OLLAMA_HOST_PORT:-11434}:11434"
     volumes:
@@ -47,7 +47,7 @@ services:
   ollama-init:
     profiles: [managed]
     image: ollama/ollama:latest
-    container_name: guardian_ollama_init
+    container_name: aegis_ollama_init
     depends_on:
       ollama:
         condition: service_healthy
@@ -65,15 +65,15 @@ services:
       - OLLAMA_HOST=http://ollama:11434
     restart: "no"
 
-  # ── Guardian AI ────────────────────────────────────────────────────────────
-  guardian_ai:
+  # ── Aegis ────────────────────────────────────────────────────────────
+  aegis:
     build:
       context: .
       dockerfile: Dockerfile
       target: runtime
-    container_name: guardian_ai
+    container_name: aegis
     ports:
-      - "${GUARDIAN_PORT:-8888}:8888"
+      - "${AEGIS_PORT:-8888}:8888"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
@@ -82,11 +82,11 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-mixtral:latest}
       - OLLAMA_MODEL_FAST=${OLLAMA_MODEL_FAST:-ollama3:latest}
-      - DATABASE_URL=sqlite:////app/data/guardian.db
+      - DATABASE_URL=sqlite:////app/data/aegis.db
       - PAYLOADS_REPO_PATH=/PayloadsAllTheThings
       - VERIFY_SSL=${VERIFY_SSL:-true}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - GUARDIAN_PORT=8888
+      - AEGIS_PORT=8888
       - MAX_GRAPH_TOKENS=${MAX_GRAPH_TOKENS:-50000}
       - MAX_CONCURRENT_SCANS=${MAX_CONCURRENT_SCANS:-3}
     depends_on:

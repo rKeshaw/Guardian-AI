@@ -1,4 +1,4 @@
-# guardian/requirements.txt
+# aegis/requirements.txt
 
 # ── Web framework ─────────────────────────────
 fastapi==0.110.0
@@ -35,3 +35,6 @@ python-jose[cryptography]==3.3.0
 # ── Utilities ─────────────────────────────────
 python-dotenv==1.0.1
 structlog==24.1.0
+
+# ── Optional semantic deduplication (Section 6) ───────────────
+sentence-transformers==3.0.1

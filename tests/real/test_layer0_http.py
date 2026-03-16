@@ -6,12 +6,12 @@ import aiohttp
 import aiosqlite
 import pytest
 
-from guardian.agents.reconnaissance_agent import ReconnaissanceAgent
-from guardian.core.database import Database
-from guardian.core.graph.attack_graph import AttackGraph, Node, NodeType
-from guardian.core.orchestrator import CentralOrchestrator, ScanContext
-from guardian.core.probing.probe_executor import ProbeExecutor
-from guardian.models.scan_session import ScanStatus
+from aegis.agents.reconnaissance_agent import ReconnaissanceAgent
+from aegis.core.database import Database
+from aegis.core.graph.attack_graph import AttackGraph, Node, NodeType
+from aegis.core.orchestrator import CentralOrchestrator, ScanContext
+from aegis.core.probing.probe_executor import ProbeExecutor
+from aegis.models.scan_session import ScanStatus
 
 from .helpers import (
     assert_valid_injection_points,

@@ -51,14 +51,14 @@ class ProbeExecutor:
 
 
 # Install a deterministic test-double module for response analyzer imports.
-probing_pkg = types.ModuleType("guardian.core.probing")
-probe_module = types.ModuleType("guardian.core.probing.probe_executor")
+probing_pkg = types.ModuleType("aegis.core.probing")
+probe_module = types.ModuleType("aegis.core.probing.probe_executor")
 probe_module.ProbeResult = ProbeResult
 probe_module.ProbeExecutor = ProbeExecutor
-sys.modules["guardian.core.probing"] = probing_pkg
-sys.modules["guardian.core.probing.probe_executor"] = probe_module
+sys.modules["aegis.core.probing"] = probing_pkg
+sys.modules["aegis.core.probing.probe_executor"] = probe_module
 
-from guardian.core.intelligence.response_analyzer import ResponseAnalyzer
+from aegis.core.intelligence.response_analyzer import ResponseAnalyzer
 
 
 def test_status_change_detected():

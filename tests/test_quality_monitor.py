@@ -1,5 +1,9 @@
-from guardian.core.intelligence.quality_monitor import QualityMonitor
-from guardian.core.memory.conversation_memory import ConversationMemory
+from aegis.core.intelligence.quality_monitor import QualityMonitor
+from aegis.core.memory.conversation_memory import ConversationMemory
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 
 def _turn(probe: str, obs: str, conf: float, next_probe: str | None = None) -> dict:
@@ -59,3 +63,34 @@ def test_long_probe_flagged():
 
     q = monitor.assess(memory, 1)
     assert any("Probe too long" == i for i in q["issues"])
+
+
+@pytest.mark.anyio
+async def test_judge_finding_confirmed():
+    monitor = QualityMonitor()
+    ai_client = SimpleNamespace()
+    ai_client.query_with_retry = AsyncMock(return_value=({
+        "verdict": "confirmed",
+        "confidence_adjustment": 0.1,
+        "reasoning": "SQL error signature + payload evidence.",
+    }, None))
+    ledger = SimpleNamespace(charge=lambda *args, **kwargs: True)
+    finding = {
+        "hypothesis": "SQL injection",
+        "exploitation_evidence": {"payload_used": "'"},
+        "confirmed_facts": ["mysql_error"],
+        "owasp_category": "A03:2023",
+    }
+    out = await monitor.judge_finding(finding, ai_client, ledger)
+    assert out["verdict"] == "confirmed"
+    assert out["confidence_adjustment"] > 0
+
+
+@pytest.mark.anyio
+async def test_judge_finding_invalid_payload_defaults_uncertain():
+    monitor = QualityMonitor()
+    ai_client = SimpleNamespace()
+    ai_client.query_with_retry = AsyncMock(return_value=("not-json", None))
+    ledger = SimpleNamespace(charge=lambda *args, **kwargs: True)
+    out = await monitor.judge_finding({}, ai_client, ledger)
+    assert out["verdict"] == "uncertain"

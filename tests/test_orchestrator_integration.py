@@ -4,10 +4,10 @@ from types import MethodType
 
 import pytest
 
-from guardian.core.config import settings
-from guardian.core.database import Database
-from guardian.core.orchestrator import CentralOrchestrator, ScanContext
-from guardian.models.scan_session import ScanStatus
+from aegis.core.config import settings
+from aegis.core.database import Database
+from aegis.core.orchestrator import CentralOrchestrator, ScanContext
+from aegis.models.scan_session import ScanStatus
 
 
 @pytest.mark.anyio
@@ -417,7 +417,7 @@ async def test_payload_generation_enabled_handles_empty_vuln_results(monkeypatch
             assert task_data["vulnerability_data"]["vulnerabilities"] == []
             return {"payload_arsenal": [], "source": "AI-Driven RAG", "skipped": False}
 
-    monkeypatch.setattr("guardian.agents.payload_agent.PayloadGenerationAgent", FakePayloadAgent)
+    monkeypatch.setattr("aegis.agents.payload_agent.PayloadGenerationAgent", FakePayloadAgent)
 
     result = await orchestrator._run_payload_generation(ctx)
     assert result["payload_arsenal"] == []

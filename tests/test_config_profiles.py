@@ -1,9 +1,9 @@
-from guardian.core.config import Settings
+from aegis.core.config import Settings
 
 
 def test_balanced_profile_enables_vuln_and_payload_only(tmp_path):
     s = Settings(
-        DATABASE_URL=f"sqlite:///{tmp_path / 'guardian.db'}",
+        DATABASE_URL=f"sqlite:///{tmp_path / 'aegis.db'}",
         SCAN_EXECUTION_PROFILE="balanced",
     )
 
@@ -15,7 +15,7 @@ def test_balanced_profile_enables_vuln_and_payload_only(tmp_path):
 
 def test_aggressive_profile_enables_active_stages(tmp_path):
     s = Settings(
-        DATABASE_URL=f"sqlite:///{tmp_path / 'guardian2.db'}",
+        DATABASE_URL=f"sqlite:///{tmp_path / 'aegis2.db'}",
         SCAN_EXECUTION_PROFILE="aggressive",
     )
 

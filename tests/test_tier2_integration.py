@@ -6,12 +6,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from guardian.core.config import settings
-from guardian.core.database import Database
-from guardian.core.graph.attack_graph import AttackGraph, Node, NodeType
-from guardian.core.orchestrator import CentralOrchestrator, ScanContext
-from guardian.core.token_ledger import TokenLedger
-from guardian.models.scan_session import ScanStatus
+from aegis.core.config import settings
+from aegis.core.database import Database
+from aegis.core.graph.attack_graph import AttackGraph, Node, NodeType
+from aegis.core.orchestrator import CentralOrchestrator, ScanContext
+from aegis.core.token_ledger import TokenLedger
+from aegis.models.scan_session import ScanStatus
 
 
 def _make_ctx(orchestrator: CentralOrchestrator) -> ScanContext:
@@ -150,7 +150,7 @@ async def test_tier2_option_a_only_vuln_analysis_adds_hypotheses(monkeypatch):
                 ),
             ]
 
-    import guardian.agents.hypothesis_agent as hypothesis_module
+    import aegis.agents.hypothesis_agent as hypothesis_module
 
     monkeypatch.setattr(hypothesis_module, "HypothesisAgent", _MockHypothesisAgent)
 
@@ -200,7 +200,7 @@ async def test_tier2_option_a_deduplication(monkeypatch):
                 )
             ]
 
-    import guardian.agents.hypothesis_agent as hypothesis_module
+    import aegis.agents.hypothesis_agent as hypothesis_module
 
     monkeypatch.setattr(hypothesis_module, "HypothesisAgent", _MockHypothesisAgent)
     await orch._run_hypothesis_seeding(ctx)
@@ -222,8 +222,8 @@ async def test_tier2_option_b_only_rag_context_appears_in_prompt(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_RAG_PROBING", True)
     monkeypatch.setattr(settings, "ENABLE_ACTIVE_CONFIRMATION", False)
 
-    from guardian.core.intelligence.reasoning_agent import ReasoningAgent
-    from guardian.core.intelligence import rag_helper as rag_module
+    from aegis.core.intelligence.reasoning_agent import ReasoningAgent
+    from aegis.core.intelligence import rag_helper as rag_module
 
     monkeypatch.setattr(rag_module.rag_helper, "get_probe_context", lambda *args, **kwargs: "MOCK_PAYLOAD_CONTEXT")
 
@@ -281,7 +281,7 @@ async def test_tier2_option_c_only_confirmation_runs_per_finding(monkeypatch):
     ctx.graph.add_node(f2)
 
     import aiohttp
-    from guardian.agents import penetration_agent as pen_module
+    from aegis.agents import penetration_agent as pen_module
 
     class _DummySession:
         def __init__(self, *args, **kwargs):
@@ -402,8 +402,8 @@ async def test_tier2_option_c_missing_payload_graceful_degradation(monkeypatch):
 async def test_tier2_option_b_empty_knowledge_index_no_crash(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_RAG_PROBING", True)
 
-    from guardian.core.intelligence.reasoning_agent import ReasoningAgent
-    from guardian.core.intelligence import rag_helper as rag_module
+    from aegis.core.intelligence.reasoning_agent import ReasoningAgent
+    from aegis.core.intelligence import rag_helper as rag_module
 
     monkeypatch.setattr(rag_module.rag_helper, "get_probe_context", lambda *args, **kwargs: "")
 

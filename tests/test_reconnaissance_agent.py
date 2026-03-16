@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from guardian.agents.reconnaissance_agent import ReconnaissanceAgent
-from guardian.core.ai_client import estimate_tokens
-from guardian.models.target_model import TargetModel
+from aegis.agents.reconnaissance_agent import ReconnaissanceAgent
+from aegis.core.ai_client import estimate_tokens
+from aegis.models.target_model import TargetModel
 
 
 @dataclass
@@ -71,8 +71,8 @@ async def test_waf_detected_from_header(monkeypatch):
     routes = _base_routes(url)
     routes[("GET", url)] = FakeResponse(status=200, headers={"cf-ray": "abc123"}, body="home")
 
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
 
     agent = ReconnaissanceAgent(db=None)
     model = await agent.run([url], {"crawl_depth": 0})
@@ -86,8 +86,8 @@ async def test_technology_detected_from_body(monkeypatch):
     routes = _base_routes(url)
     routes[("GET", url)] = FakeResponse(status=200, headers={"server": "nginx"}, body="<div>wp-content/themes</div>")
 
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
 
     agent = ReconnaissanceAgent(db=None)
     model = await agent.run([url], {"crawl_depth": 0})
@@ -103,8 +103,8 @@ async def test_html_comment_extracted(monkeypatch):
     routes[("GET", url)] = FakeResponse(status=200, headers={"server": "nginx"}, body=html)
     routes[("GET", f"{url}/x")] = FakeResponse(status=200, headers={"server": "nginx"}, body="<html></html>")
 
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
 
     agent = ReconnaissanceAgent(db=None)
     model = await agent.run([url], {"crawl_depth": 1})
@@ -120,8 +120,8 @@ async def test_openapi_endpoints_extracted(monkeypatch):
     routes[("HEAD", f"{url}/swagger.json")] = FakeResponse(status=200)
     routes[("GET", f"{url}/swagger.json")] = FakeResponse(status=200, json_data=spec)
 
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
 
     agent = ReconnaissanceAgent(db=None)
     model = await agent.run([url], {"crawl_depth": 0})
@@ -134,13 +134,13 @@ async def test_port_scan_failure_returns_empty(monkeypatch):
     url = "https://example.com"
     routes = _base_routes(url)
 
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
 
     def boom(*args, **kwargs):
         raise RuntimeError("nmap unavailable")
 
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.subprocess.run", boom)
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.subprocess.run", boom)
 
     agent = ReconnaissanceAgent(db=None)
     model = await agent.run([url], {"crawl_depth": 0})
@@ -152,8 +152,8 @@ async def test_port_scan_uses_hostname_without_port(monkeypatch):
     url = "https://example.com:8080"
     routes = _base_routes(url)
 
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
 
     captured = {"cmd": None}
 
@@ -161,7 +161,7 @@ async def test_port_scan_uses_hostname_without_port(monkeypatch):
         captured["cmd"] = cmd
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.subprocess.run", fake_run)
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.subprocess.run", fake_run)
 
     agent = ReconnaissanceAgent(db=None)
     await agent.run([url], {"crawl_depth": 0})
@@ -175,11 +175,11 @@ async def test_port_scan_uses_hostname_without_port(monkeypatch):
 async def test_behavioral_waf_detected_on_403_probe(monkeypatch):
     url = "https://example.com"
     routes = _base_routes(url)
-    routes[("GET", f"{url}?guardian_waf_probe=<script>alert(1)</script>")] = FakeResponse(status=403, headers={}, body="forbidden")
-    routes[("GET", f"{url}/?guardian_waf_probe=<script>alert(1)</script>")] = FakeResponse(status=403, headers={}, body="forbidden")
+    routes[("GET", f"{url}?aegis_waf_probe=<script>alert(1)</script>")] = FakeResponse(status=403, headers={}, body="forbidden")
+    routes[("GET", f"{url}/?aegis_waf_probe=<script>alert(1)</script>")] = FakeResponse(status=403, headers={}, body="forbidden")
 
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
 
     agent = ReconnaissanceAgent(db=None)
     model = await agent.run([url], {"crawl_depth": 0})
@@ -241,8 +241,8 @@ async def test_js_fetch_endpoint_extracted(monkeypatch):
     routes[("GET", url)] = FakeResponse(status=200, headers={"server": "nginx"}, body=html)
     routes[("GET", f"{url}/static/app.js")] = FakeResponse(status=200, headers={}, body=js)
 
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
-    monkeypatch.setattr("guardian.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.ClientSession", FakeClientSessionFactory(routes))
+    monkeypatch.setattr("aegis.agents.reconnaissance_agent.aiohttp.TCPConnector", lambda *a, **k: None)
 
     agent = ReconnaissanceAgent(db=None)
     model = await agent.run([url], {"crawl_depth": 0})

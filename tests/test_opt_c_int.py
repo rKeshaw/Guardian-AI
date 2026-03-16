@@ -5,11 +5,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from guardian.agents.penetration_agent import PenetrationAgent, TestResult as PenetrationTestResult
-from guardian.core.config import settings
-from guardian.core.database import Database
-from guardian.core.graph.attack_graph import AttackGraph, Node, NodeType
-from guardian.core.orchestrator import CentralOrchestrator, ScanContext
+from aegis.agents.penetration_agent import PenetrationAgent, TestResult as PenetrationTestResult
+from aegis.core.config import settings
+from aegis.core.database import Database
+from aegis.core.graph.attack_graph import AttackGraph, Node, NodeType
+from aegis.core.orchestrator import CentralOrchestrator, ScanContext
 
 
 class _DummyClientSession:
@@ -176,7 +176,7 @@ async def test_active_confirmation_passes_bearer_auth_header_to_session(monkeypa
         assert session.headers.get("Authorization") == "Bearer tok"
         return {"finding_id": finding_node.id, "http_confirmed": False, "new_indicators": []}
 
-    import guardian.core.probing.probe_executor as pe_module
+    import aegis.core.probing.probe_executor as pe_module
 
     class _PE:
         @classmethod
@@ -184,7 +184,7 @@ async def test_active_confirmation_passes_bearer_auth_header_to_session(monkeypa
             return await _create(auth_headers=auth_headers, cookies=cookies)
 
     monkeypatch.setattr(pe_module, "ProbeExecutor", _PE)
-    monkeypatch.setattr("guardian.core.probing.session_manager.SessionManager.authenticate", _auth)
+    monkeypatch.setattr("aegis.core.probing.session_manager.SessionManager.authenticate", _auth)
     monkeypatch.setattr(PenetrationAgent, "confirm_finding", _fake_confirm)
 
     orchestrator = CentralOrchestrator(Database())
@@ -216,7 +216,7 @@ async def test_active_confirmation_runs_without_auth_config(monkeypatch):
     async def _fake_confirm(self, finding_node, recon_data, session):
         return {"finding_id": finding_node.id, "http_confirmed": False, "new_indicators": []}
 
-    import guardian.core.probing.probe_executor as pe_module
+    import aegis.core.probing.probe_executor as pe_module
 
     class _PE:
         @classmethod
@@ -224,7 +224,7 @@ async def test_active_confirmation_runs_without_auth_config(monkeypatch):
             return await _create(auth_headers=auth_headers, cookies=cookies)
 
     monkeypatch.setattr(pe_module, "ProbeExecutor", _PE)
-    monkeypatch.setattr("guardian.core.probing.session_manager.SessionManager.authenticate", _auth)
+    monkeypatch.setattr("aegis.core.probing.session_manager.SessionManager.authenticate", _auth)
     monkeypatch.setattr(PenetrationAgent, "confirm_finding", _fake_confirm)
 
     orchestrator = CentralOrchestrator(Database())
@@ -258,7 +258,7 @@ async def test_active_confirmation_closes_probe_executor_on_error(monkeypatch):
     async def _boom_confirm(self, finding_node, recon_data, session):
         raise RuntimeError("confirm failed")
 
-    import guardian.core.probing.probe_executor as pe_module
+    import aegis.core.probing.probe_executor as pe_module
 
     class _PE:
         @classmethod
@@ -266,7 +266,7 @@ async def test_active_confirmation_closes_probe_executor_on_error(monkeypatch):
             return await _create(auth_headers=auth_headers, cookies=cookies)
 
     monkeypatch.setattr(pe_module, "ProbeExecutor", _PE)
-    monkeypatch.setattr("guardian.core.probing.session_manager.SessionManager.authenticate", _auth)
+    monkeypatch.setattr("aegis.core.probing.session_manager.SessionManager.authenticate", _auth)
     monkeypatch.setattr(PenetrationAgent, "confirm_finding", _boom_confirm)
 
     orchestrator = CentralOrchestrator(Database())
