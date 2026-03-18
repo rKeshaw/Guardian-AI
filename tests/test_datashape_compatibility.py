@@ -86,6 +86,32 @@ def test_payload_prompt_uses_llm_native_target_context():
     assert "WAF bypass variants when a WAF is detected" in prompt
 
 
+def test_payload_prompt_handles_missing_waf_signal():
+    agent = PayloadGenerationAgent(None)
+    recon_context = {
+        "https://example.com": {
+            "technologies": ["python", "postgresql"],
+            "waf_detected": None,
+            "backend_language": "Python",
+            "database_hint": "PostgreSQL",
+            "attack_surface_signals": [],
+            "open_ports": ["443/https"],
+            "endpoints": ["https://example.com/search"],
+            "forms": [{"action": "/search", "method": "GET", "inputs": ["q"]}],
+        }
+    }
+    vuln = {
+        "vulnerability_name": "SQL Injection",
+        "owasp_category": "A03:2023",
+        "attack_vectors": ["q parameter on /search"],
+    }
+
+    prompt = agent._build_prompt(recon_context, vuln)
+
+    assert "\"waf_detected\": null" in prompt
+    assert "\"waf_detected\": \"cloudflare\"" not in prompt
+
+
 def test_penetration_discovery_supports_flat_recon_shape():
     agent = PenetrationAgent(None)
     points = agent._discover_injection_points(

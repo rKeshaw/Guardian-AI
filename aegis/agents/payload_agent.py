@@ -60,6 +60,10 @@ class PayloadGenerationAgent(BaseAgent):
     def __init__(self, db) -> None:
         super().__init__(db, "PayloadGenerationAgent")
 
+    @staticmethod
+    def _optional_str(value: Any) -> str | None:
+        return str(value) if value is not None else None
+
     # ── Entry point ───────────────────────────
 
     async def execute(self, task_data: dict[str, Any]) -> dict[str, Any]:
@@ -202,17 +206,19 @@ class PayloadGenerationAgent(BaseAgent):
                 web = data.get("web_applications", {}) if isinstance(data.get("web_applications"), dict) else {}
                 forms = forms or web.get("forms", [])
                 endpoints = endpoints or web.get("endpoints", [])
+            raw_signals = data.get("attack_surface_signals")
+            attack_surface_signals = raw_signals if isinstance(raw_signals, list) else []
+            waf_detected = data.get("waf_detected")
+            backend_language = data.get("backend_language")
+            database_hint = data.get("database_hint")
+            framework = data.get("framework")
             context[target_url] = {
                 "technologies": tech_names[:15],
-                "waf_detected": data.get("waf_detected"),
-                "backend_language": data.get("backend_language"),
-                "database_hint": data.get("database_hint"),
-                "framework": data.get("framework"),
-                "attack_surface_signals": (
-                    data.get("attack_surface_signals", [])[:20]
-                    if isinstance(data.get("attack_surface_signals"), list)
-                    else []
-                ),
+                "waf_detected": self._optional_str(waf_detected),
+                "backend_language": self._optional_str(backend_language),
+                "database_hint": self._optional_str(database_hint),
+                "framework": self._optional_str(framework),
+                "attack_surface_signals": attack_surface_signals[:20],
                 "open_ports": [
                     f"{p.get('port')}/{p.get('service')}" if isinstance(p, dict) else str(p)
                     for p in data.get("open_ports", [])[:10]
@@ -272,8 +278,7 @@ web application vulnerabilities. You are mid-engagement and must produce immedia
 {exploitation_goal}
 
 == INSTRUCTIONS ==
-1. Think through likely backend behavior using the target context (technology stack, parameter handling, \
-defensive controls, framework patterns) before deriving payload strings.
+1. Think through likely backend behavior using the target context (technology stack, parameter handling, defensive controls, framework patterns) before deriving payload strings.
 2. Generate 4-8 payloads with explicit diversity:
    - Canonical/basic payload
    - Encoded or obfuscated variants
@@ -293,8 +298,8 @@ Return ONLY a valid JSON object — no markdown wrapper:
     {{
       "target_vulnerability": "{vuln.get("vulnerability_name", "")}",
       "owasp_category": "{vuln.get("owasp_category", "")}",
-        "attack_vectors": {json.dumps(vuln.get("attack_vectors", []))},
-        "payloads": [
+      "attack_vectors": {json.dumps(vuln.get("attack_vectors", []))},
+      "payloads": [
         {{
           "type": "Basic | Encoded | WAF Bypass | Time-Based | Error-Based",
           "description": "What this payload tests, why it matches this target, and confirmation signal",

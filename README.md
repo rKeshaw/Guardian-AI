@@ -19,7 +19,7 @@
 git clone https://github.com/rKeshaw/Aegis.git
 cd Aegis
 
-# Clone the payload knowledge base (required)
+# Clone the payload knowledge base (optional; used by ReasoningAgent RAG probing)
 git clone https://github.com/swisskyrepo/PayloadsAllTheThings.git
 
 # Create a .env file and configure (see Configuration section)
@@ -132,7 +132,7 @@ All settings are environment variables. Create a `.env` file in the project root
 | `OLLAMA_MODEL_FAST` | `llama3:latest` | Fast model for lightweight tasks |
 | `AI_PROVIDER` | `ollama` | LLM provider (`ollama` / `openai`) |
 | `DATABASE_URL` | `sqlite:////app/data/aegis.db` | SQLite database path |
-| `PAYLOADS_REPO_PATH` | `/PayloadsAllTheThings` | Required knowledge base path |
+| `PAYLOADS_REPO_PATH` | `/PayloadsAllTheThings` | Optional knowledge base path for RAG-assisted probing |
 | `VERIFY_SSL` | `true` | Toggle SSL certificate verification |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `AEGIS_PORT` | `8888` | HTTP port |
@@ -384,7 +384,7 @@ Aegis/
 
 * **Docker** and **Docker Compose** v2.20+
 * **Ollama** with `deepseek-r1:32b` pulled (or configure a different model via `OLLAMA_MODEL`)
-* `PayloadsAllTheThings` repository cloned and accessible at `PAYLOADS_REPO_PATH`
+* Optional: `PayloadsAllTheThings` cloned and accessible at `PAYLOADS_REPO_PATH` for RAG-assisted probing
 * **8 GB RAM** recommended (4 GB minimum); 16 GB+ for smooth local LLM inference
 * Optional: NVIDIA GPU + nvidia-container-toolkit for hardware-accelerated inference
 
