@@ -1,6 +1,19 @@
 from aegis.core.config import Settings
 
 
+def test_default_model_prefers_reasoning_model(tmp_path):
+    s = Settings(DATABASE_URL=f"sqlite:///{tmp_path / 'default.db'}")
+    assert s.DEFAULT_MODEL == "deepseek-r1:32b"
+
+
+def test_ollama_model_alias_overrides_default_model(tmp_path):
+    s = Settings(
+        DATABASE_URL=f"sqlite:///{tmp_path / 'alias.db'}",
+        OLLAMA_MODEL="custom-model:latest",
+    )
+    assert s.DEFAULT_MODEL == "custom-model:latest"
+
+
 def test_balanced_profile_enables_vuln_and_payload_only(tmp_path):
     s = Settings(
         DATABASE_URL=f"sqlite:///{tmp_path / 'aegis.db'}",

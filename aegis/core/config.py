@@ -23,7 +23,8 @@ class Settings(BaseSettings):
 
     # ── AI / Ollama ───────────────────────────
     OLLAMA_BASE_URL: str = "http://ollama:11434"
-    DEFAULT_MODEL: str = "mixtral:latest"
+    # Reasoning-first default improves payload generation quality for target-specific exploit design.
+    DEFAULT_MODEL: str = "deepseek-r1:32b"
     # Backward-compatibility alias for existing deployments using OLLAMA_MODEL.
     # If set, resolve_paths() maps it to DEFAULT_MODEL.
     OLLAMA_MODEL: str | None = None
