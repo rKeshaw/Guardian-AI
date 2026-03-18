@@ -25,7 +25,7 @@ git clone https://github.com/swisskyrepo/PayloadsAllTheThings.git
 # Create a .env file and configure (see Configuration section)
 cat > .env << 'EOF'
 OLLAMA_BASE_URL=http://host.docker.internal:11434
-OLLAMA_MODEL=mixtral:latest
+OLLAMA_MODEL=deepseek-r1:32b
 EOF
 
 docker compose up
@@ -52,7 +52,7 @@ Vulnerability Analysis
     ↓
 Hypothesis Seeding         ← tech-specific testable hypotheses
     ↓
-Payload Generation         ← RAG-based payloads from PayloadsAllTheThings
+Payload Generation         ← LLM-native, target-aware payload generation
     ↓
 Active Penetration         ← baseline-aware injection testing
     ↓
@@ -70,7 +70,7 @@ Reporting                  ← HTML / Markdown / JSON export
 | `ReconnaissanceAgent` | ReconMaster | Port scanning (nmap), subdomain enumeration, web crawling, tech fingerprinting, WAF detection, CORS checks |
 | `VulnerabilityAnalysisAgent` | VulnHunter | OWASP Top 10 (2023) classification and triage via LLM |
 | `HypothesisAgent` | — | Generates testable hypotheses from detected tech stack (WordPress, Django, Laravel, Rails, …) |
-| `PayloadGenerationAgent` | PayloadSmith | RAG-based payload generation from `PayloadsAllTheThings` with deterministic OWASP→file mapping |
+| `PayloadGenerationAgent` | PayloadSmith | LLM-native payload generation using structured recon + vulnerability context |
 | `PenetrationAgent` | ShadowOps | Active injection testing with baseline-aware success detection |
 | `ReportingAgent` | ReportMaster | Executive summary + per-finding technical details + remediation plans |
 
@@ -101,7 +101,7 @@ Uses your existing Ollama instance. Only the `aegis` container starts.
 
 ```env
 OLLAMA_BASE_URL=http://host.docker.internal:11434
-OLLAMA_MODEL=mixtral:latest
+OLLAMA_MODEL=deepseek-r1:32b
 ```
 
 ### Managed mode (`--profile managed`)
@@ -128,7 +128,7 @@ All settings are environment variables. Create a `.env` file in the project root
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `OLLAMA_BASE_URL` | `http://ollama:11434` | Ollama API endpoint |
-| `OLLAMA_MODEL` | `mixtral:latest` | Primary LLM (analysis, generation, reasoning) |
+| `OLLAMA_MODEL` | `deepseek-r1:32b` | Primary LLM (analysis, generation, reasoning) |
 | `OLLAMA_MODEL_FAST` | `llama3:latest` | Fast model for lightweight tasks |
 | `AI_PROVIDER` | `ollama` | LLM provider (`ollama` / `openai`) |
 | `DATABASE_URL` | `sqlite:////app/data/aegis.db` | SQLite database path |
@@ -259,11 +259,11 @@ Both emit heartbeats every 30 s and a final `scan_complete` / `scan_error` event
 
 Every scan gets its own `ScanContext` (agents, event queue, attack graph, token ledger). The orchestrator evicts completed sessions after a 1-hour TTL; historical sessions are retrievable from the SQLite database.
 
-### RAG-based payload pipeline
+### LLM-native payload pipeline
 
-* At startup `KnowledgeIndex` indexes `.md` files from `PayloadsAllTheThings`.
-* File selection uses a deterministic `OWASP_TO_FILES` mapping — the LLM never guesses filenames.
-* Sections are scored by exploit-relevance keywords (`payload`, `bypass`, `waf`, `technique`) and selected to fit a 3,500-token budget per vulnerability.
+* `PayloadGenerationAgent` builds a structured target context from reconnaissance + vulnerability metadata.
+* Payload generation relies on model reasoning over injection-point details, technology stack, and observed behavior signals.
+* JSON schema validation and retry-with-correction enforce strict machine-consumable output for downstream phases.
 
 ### Hypothesis seeding
 
@@ -383,7 +383,7 @@ Aegis/
 ## Requirements
 
 * **Docker** and **Docker Compose** v2.20+
-* **Ollama** with `mixtral:latest` pulled (or configure a different model via `OLLAMA_MODEL`)
+* **Ollama** with `deepseek-r1:32b` pulled (or configure a different model via `OLLAMA_MODEL`)
 * `PayloadsAllTheThings` repository cloned and accessible at `PAYLOADS_REPO_PATH`
 * **8 GB RAM** recommended (4 GB minimum); 16 GB+ for smooth local LLM inference
 * Optional: NVIDIA GPU + nvidia-container-toolkit for hardware-accelerated inference

@@ -9,12 +9,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from aegis.agents.base_agent import BaseAgent
-from aegis.core.ai_client import ai_client, AIPersona
-from aegis.core.knowledge_index import (
-    knowledge_index,
-    parse_knowledge_file,
-    estimate_tokens,
-)
+from aegis.core.ai_client import ai_client, AIPersona, estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -46,19 +41,15 @@ class PayloadArsenalResponse(BaseModel):
 
 class PayloadGenerationAgent(BaseAgent):
     """
-    Agent 3 — Retrieval-Augmented Payload Generation.
+    Agent 3 — LLM-native payload generation.
 
     For each vulnerability identified by VulnerabilityAnalysisAgent:
-      1. Look up relevant knowledge files using the programmatic OWASP_TO_FILES
-         table (via knowledge_index.files_for_vulnerability).
-      2. Extract section-aware, token-budgeted content from each file.
-      3. Build a prompt containing recon context + vuln details + retrieved
-         knowledge and query the LLM for tailored payloads.
-      4. Validate the response and retry with correction on failure.
+      1. Build a rich, target-specific context from reconnaissance and
+         vulnerability metadata.
+      2. Prompt the LLM to reason about exploitation strategy and generate
+         diverse payloads tailored to that context.
+      3. Validate the response and retry with correction on failure.
     """
-
-    # Per-vulnerability knowledge token budget
-    KNOWLEDGE_TOKEN_BUDGET = 3500
 
     # Warn if full prompt exceeds this
     PROMPT_TOKEN_WARN = 6500
@@ -68,8 +59,6 @@ class PayloadGenerationAgent(BaseAgent):
 
     def __init__(self, db) -> None:
         super().__init__(db, "PayloadGenerationAgent")
-        # Ensure the index is built at agent init time
-        knowledge_index.build()
 
     # ── Entry point ───────────────────────────
 
@@ -94,7 +83,7 @@ class PayloadGenerationAgent(BaseAgent):
                 results = {
                     "task_id": task_id,
                     "payload_arsenal": [],
-                    "source": "AI-Driven RAG",
+                    "source": "AI-Driven Contextual Generation",
                 }
                 await self._complete_task(results, session_id)
                 return results
@@ -112,7 +101,7 @@ class PayloadGenerationAgent(BaseAgent):
             results = {
                 "task_id": task_id,
                 "payload_arsenal": arsenal,
-                "source": "AI-Driven RAG",
+                "source": "AI-Driven Contextual Generation",
             }
             await self._complete_task(results, session_id)
             logger.info(
@@ -140,11 +129,8 @@ class PayloadGenerationAgent(BaseAgent):
             vuln_name, owasp_cat,
         )
 
-        # ── Step 1: Retrieve knowledge (FIX 03 + 04) ──
-        knowledge_text = self._retrieve_knowledge(owasp_cat, vuln_name)
-
-        # ── Step 2: Build prompt (FIX 05 — section-aware content already applied) ──
-        prompt = self._build_prompt(recon_context, vuln, knowledge_text)
+        # ── Step 1: Build contextual prompt ────────────
+        prompt = self._build_prompt(recon_context, vuln)
         estimated = estimate_tokens(prompt)
 
         if estimated > self.PROMPT_TOKEN_WARN:
@@ -153,7 +139,7 @@ class PayloadGenerationAgent(BaseAgent):
                 estimated, vuln_name,
             )
 
-        # ── Step 3: Query LLM with retry ──────────────
+        # ── Step 2: Query LLM with retry ──────────────
         last_error = "No attempts made"
         for attempt in range(1, self.MAX_RETRIES + 2):
             raw = await ai_client.query_ai(prompt, persona=AIPersona.PAYLOAD_GENERATOR)
@@ -183,43 +169,6 @@ class PayloadGenerationAgent(BaseAgent):
             vuln_name, self.MAX_RETRIES + 1, last_error,
         )
         return None
-
-    # ── Knowledge retrieval (FIX 03 + 05) ────
-
-    def _retrieve_knowledge(self, owasp_category: str, vuln_name: str) -> str:
-        """
-        1. Use knowledge_index.files_for_vulnerability() to look up files from
-           the programmatic OWASP_TO_FILES table — no LLM filename selection.
-        2. Extract section-aware, token-budgeted content from each file.
-        3. Merge up to 3 files, each limited to KNOWLEDGE_TOKEN_BUDGET // 3 tokens.
-        """
-        file_paths = knowledge_index.files_for_vulnerability(owasp_category, vuln_name)
-
-        if not file_paths:
-            logger.warning(
-                "No knowledge files found for vuln=%s category=%s — proceeding without RAG",
-                vuln_name, owasp_category,
-            )
-            return "No authoritative knowledge available for this vulnerability type."
-
-        per_file_budget = self.KNOWLEDGE_TOKEN_BUDGET // max(len(file_paths), 1)
-        parts: list[str] = []
-
-        for path in file_paths:
-            from pathlib import Path
-            filename = Path(path).name
-            content = parse_knowledge_file(path, token_budget=per_file_budget)
-            if content:
-                parts.append(f"### Source: {filename}\n\n{content}")
-                logger.debug(
-                    "Knowledge retrieved file=%s tokens≈%d",
-                    filename, estimate_tokens(content),
-                )
-
-        if not parts:
-            return "Knowledge files found but content extraction returned empty results."
-
-        return "\n\n---\n\n".join(parts)
 
     # ── Recon context builder ─────────────────
 
@@ -255,6 +204,15 @@ class PayloadGenerationAgent(BaseAgent):
                 endpoints = endpoints or web.get("endpoints", [])
             context[target_url] = {
                 "technologies": tech_names[:15],
+                "waf_detected": data.get("waf_detected"),
+                "backend_language": data.get("backend_language"),
+                "database_hint": data.get("database_hint"),
+                "framework": data.get("framework"),
+                "attack_surface_signals": (
+                    data.get("attack_surface_signals", [])[:20]
+                    if isinstance(data.get("attack_surface_signals"), list)
+                    else []
+                ),
                 "open_ports": [
                     f"{p.get('port')}/{p.get('service')}" if isinstance(p, dict) else str(p)
                     for p in data.get("open_ports", [])[:10]
@@ -278,27 +236,55 @@ class PayloadGenerationAgent(BaseAgent):
         self,
         recon_context: dict[str, Any],
         vuln: dict[str, Any],
-        knowledge: str,
     ) -> str:
+        owasp_category = str(vuln.get("owasp_category", ""))
+        injection_point = (
+            vuln.get("injection_point")
+            if isinstance(vuln.get("injection_point"), dict)
+            else {}
+        )
+        target_context = {
+            "reconnaissance": recon_context,
+            "vulnerability_name": vuln.get("vulnerability_name", ""),
+            "owasp_category": owasp_category,
+            "risk_level": vuln.get("risk_level", ""),
+            "attack_vectors": vuln.get("attack_vectors", []),
+            "injection_point": {
+                "url": injection_point.get("url"),
+                "method": injection_point.get("method"),
+                "param_name": injection_point.get("param_name"),
+                "param_type": injection_point.get("param_type"),
+                "context_hint": injection_point.get("context_hint", ""),
+            },
+            "database_hint": vuln.get("database_hint"),
+            "backend_language": vuln.get("backend_language"),
+            "waf_detected": vuln.get("waf_detected"),
+            "behavioral_signals": vuln.get("behavioral_signals", []),
+        }
+        exploitation_goal = self._success_criteria_for_category(owasp_category)
         return f"""You are "PayloadSmith", an expert exploit developer specialising in \
-web application vulnerabilities. Generate a focused payload arsenal for the vulnerability \
-specified in CONTEXT 2, informed by the reconnaissance data and authoritative knowledge provided.
+web application vulnerabilities. You are mid-engagement and must produce immediately testable payloads.
 
-== CONTEXT 1: RECONNAISSANCE (target technologies and endpoints) ==
-{json.dumps(recon_context, indent=2)}
+== TARGET CONTEXT ==
+{json.dumps(target_context, indent=2)}
 
-== CONTEXT 2: VULNERABILITY TO TARGET ==
-{json.dumps(vuln, indent=2)}
-
-== CONTEXT 3: AUTHORITATIVE KNOWLEDGE ==
-{knowledge}
+== EXPLOITATION SUCCESS CRITERIA ==
+{exploitation_goal}
 
 == INSTRUCTIONS ==
-1. Generate 4-8 payloads: include Basic, Encoded/Obfuscated, and WAF Bypass variants.
-2. Tailor payloads to the specific technologies and endpoints in CONTEXT 1.
-3. Base payload structure on examples from CONTEXT 3.
-4. Each payload must be immediately usable — no placeholders except for injection points \
-marked as <INJECT>.
+1. Think through likely backend behavior using the target context (technology stack, parameter handling, \
+defensive controls, framework patterns) before deriving payload strings.
+2. Generate 4-8 payloads with explicit diversity:
+   - Canonical/basic payload
+   - Encoded or obfuscated variants
+   - WAF bypass variants when a WAF is detected
+   - Technology-specific variants (e.g., DB/vendor/framework specific syntax when hints exist)
+3. Every payload must be immediately usable and target the concrete injection point and attack vectors.
+4. In each payload "description", include concise reasoning:
+   - what this payload tests,
+   - why it fits this target,
+   - what response pattern would confirm exploitation.
+5. Avoid generic placeholders except where an explicit injection marker is unavoidable.
 
 == OUTPUT FORMAT ==
 Return ONLY a valid JSON object — no markdown wrapper:
@@ -307,17 +293,46 @@ Return ONLY a valid JSON object — no markdown wrapper:
     {{
       "target_vulnerability": "{vuln.get("vulnerability_name", "")}",
       "owasp_category": "{vuln.get("owasp_category", "")}",
-      "attack_vectors": {json.dumps(vuln.get("attack_vectors", []))},
-      "payloads": [
+        "attack_vectors": {json.dumps(vuln.get("attack_vectors", []))},
+        "payloads": [
         {{
           "type": "Basic | Encoded | WAF Bypass | Time-Based | Error-Based",
-          "description": "What this payload does and why it works",
+          "description": "What this payload tests, why it matches this target, and confirmation signal",
           "payload": "actual payload string"
         }}
       ]
     }}
   ]
 }}"""
+
+    @staticmethod
+    def _success_criteria_for_category(owasp_category: str) -> str:
+        normalized = (owasp_category or "").strip().lower()
+        if normalized.startswith("a03") or "injection" in normalized:
+            return (
+                "For injection-class vulnerabilities, success means measurable backend impact "
+                "(e.g., SQL/database errors, differential responses, data extraction paths, or "
+                "reliable timing side channels)."
+            )
+        if normalized.startswith("a01") or "access control" in normalized:
+            return (
+                "For broken access control, success means unauthorized data access or state changes "
+                "across privilege boundaries."
+            )
+        if normalized.startswith("a07") or "authentication" in normalized:
+            return (
+                "For authentication failures, success means bypassing or weakening authentication/session "
+                "controls to gain unauthorized access."
+            )
+        if normalized.startswith("a05") or "csrf" in normalized:
+            return (
+                "For CSRF or misconfiguration-style abuse, success means triggering an unintended state-changing "
+                "action without a valid anti-CSRF/control token."
+            )
+        return (
+            "Define success as observable, repeatable evidence that the target violates the stated OWASP category "
+            "through unauthorized behavior, execution, disclosure, or control bypass."
+        )
 
     def _build_correction_prompt(
         self,
